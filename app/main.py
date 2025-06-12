@@ -48,6 +48,7 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    from datetime import datetime
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
@@ -99,4 +100,5 @@ def show_tutorial():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=settings.debug)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=settings.debug)
