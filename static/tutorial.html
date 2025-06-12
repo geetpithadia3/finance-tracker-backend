@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Finance Tracker - How It Works</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            border-bottom: 3px solid #007bff;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #007bff;
+            margin-top: 30px;
+        }
+        .step {
+            margin: 20px 0;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-left: 4px solid #007bff;
+            border-radius: 5px;
+        }
+        .step-number {
+            display: inline-block;
+            background-color: #007bff;
+            color: white;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 30px;
+            margin-right: 15px;
+            font-weight: bold;
+        }
+        .feature-list {
+            list-style-type: none;
+            padding-left: 0;
+        }
+        .feature-list li {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #e9ecef;
+            border-radius: 5px;
+        }
+        .api-endpoint {
+            background-color: #f1f3f4;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            margin: 10px 0;
+        }
+        .highlight {
+            background-color: #fff3cd;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #ffeaa7;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Finance Tracker - How It Works</h1>
+        
+        <div class="highlight">
+            <strong>Welcome to Finance Tracker!</strong> This comprehensive personal finance management system helps you track expenses, manage budgets, and optimize your financial planning with smart allocation features.
+        </div>
+
+        <div class="step">
+            <span class="step-number">1</span>
+            <h3>Authentication & Setup</h3>
+            <p>Start by registering your account and logging in to access the full feature set.</p>
+            <div class="api-endpoint">POST /auth/register<br>POST /auth/login</div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">2</span>
+            <h3>Manage Categories</h3>
+            <p>Create and organize your expense categories for better transaction organization.</p>
+            <div class="api-endpoint">POST /categories<br>GET /categories<br>PUT /categories/{id}</div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">3</span>
+            <h3>Track Transactions</h3>
+            <p>Add individual transactions or bulk upload your financial data. Support for both single and bulk operations.</p>
+            <div class="api-endpoint">POST /transactions (single or bulk)<br>PUT /transactions (single or bulk)<br>POST /transactions/list</div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">4</span>
+            <h3>Set Up Budgets</h3>
+            <p>Create detailed budgets with category-specific limits for better financial control.</p>
+            <div class="api-endpoint">POST /budgets<br>GET /budgets?year_month=2024-03<br>GET /budgets/comparison/monthly</div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">5</span>
+            <h3>Recurring Transactions</h3>
+            <p>Set up recurring income and expenses with advanced scheduling options including date flexibility and priority levels.</p>
+            <div class="api-endpoint">POST /recurring-transactions<br>GET /recurring-transactions<br>PUT /recurring-transactions/{id}/status</div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">6</span>
+            <h3>Smart Allocation</h3>
+            <p>Use our intelligent allocation system to optimize your budget based on income patterns and upcoming expenses.</p>
+            <div class="api-endpoint">GET /allocation?year_month=2024-03</div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">7</span>
+            <h3>Dashboard & Analytics</h3>
+            <p>View comprehensive financial insights with month-by-month analysis and expense categorization.</p>
+            <div class="api-endpoint">GET /dashboard?year_month=2024-03<br>GET /dashboard/expenses-by-category<br>GET /expenses</div>
+        </div>
+
+        <div class="step">
+            <span class="step-number">8</span>
+            <h3>Reports & Export</h3>
+            <p>Generate detailed budget reports in CSV format for external analysis.</p>
+            <div class="api-endpoint">GET /budgets/report?year=2024&month=3&format=csv</div>
+        </div>
+
+        <h2>Key Features</h2>
+        <ul class="feature-list">
+            <li><strong>Enhanced Budget System:</strong> Category-specific budgets with spending tracking</li>
+            <li><strong>Smart Allocation:</strong> AI-powered budget optimization based on spending patterns</li>
+            <li><strong>Advanced Recurring Transactions:</strong> Flexible scheduling with date flexibility options</li>
+            <li><strong>Bulk Operations:</strong> Efficient bulk transaction processing</li>
+            <li><strong>Month-based Analytics:</strong> Detailed financial insights by time period</li>
+            <li><strong>Export Capabilities:</strong> CSV reports for external analysis</li>
+            <li><strong>RESTful API:</strong> Complete programmatic access to all features</li>
+        </ul>
+
+        <h2>API Documentation</h2>
+        <p>For complete API documentation, visit <code>/docs</code> for the interactive Swagger UI or <code>/redoc</code> for the ReDoc interface.</p>
+        
+        <div class="highlight">
+            <strong>Getting Started:</strong> Begin by creating categories for your expenses, then add some transactions, and set up your first budget. The system will learn from your patterns and provide intelligent allocation recommendations.
+        </div>
+    </div>
+</body>
+</html>
