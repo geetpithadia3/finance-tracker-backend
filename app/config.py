@@ -22,7 +22,13 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     
     # CORS
-    allowed_origins: List[str] = ["*"]
+    allowed_origins: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "https://finance-tracker-frontend-7131.onrender.com"
+    ]
     
     # PostgreSQL specific settings
     postgres_host: str = "localhost"
