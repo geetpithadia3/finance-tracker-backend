@@ -9,7 +9,7 @@ from app import models, schemas, auth
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
-@router.get("", response_model=schemas.DashboardResponse)
+@router.get("")
 def get_dashboard(
     year_month: str = None,
     current_user: models.User = Depends(auth.get_current_user),
@@ -22,30 +22,64 @@ def get_dashboard(
     
     year, month = map(int, year_month.split('-'))
     
-    # Get transactions for specified month
-    transactions = db.query(models.Transaction).filter(
+    # Get all transactions for specified month
+    all_transactions = db.query(models.Transaction).filter(
         models.Transaction.user_id == current_user.id,
         models.Transaction.is_deleted == False,
         extract('year', models.Transaction.occurred_on) == year,
         extract('month', models.Transaction.occurred_on) == month
     ).all()
     
-    total_income = sum(t.amount for t in transactions if t.type == "INCOME")
-    total_expenses = sum(t.amount for t in transactions if t.type == "EXPENSE")
+    # Separate transactions by type
+    expenses = [t for t in all_transactions if t.type == "EXPENSE"]
+    income = [t for t in all_transactions if t.type == "INCOME"]
+    savings = [t for t in all_transactions if t.type == "SAVINGS"]
     
-    # Group expenses by category
-    expenses_by_category = {}
-    for t in transactions:
-        if t.type == "EXPENSE" and t.category:
-            category_name = t.category.name
-            expenses_by_category[category_name] = expenses_by_category.get(category_name, 0) + t.amount
+    # Get budget data for this period
+    budget = db.query(models.Budget).filter(
+        models.Budget.user_id == current_user.id,
+        models.Budget.year_month == year_month,
+        models.Budget.is_active == True
+    ).first()
+    
+    budgets = []
+    if budget:
+        for cat_budget in budget.category_limits:
+            # Calculate spent amount for this category in this period
+            spent = db.query(func.sum(models.Transaction.amount)).filter(
+                models.Transaction.user_id == current_user.id,
+                models.Transaction.category_id == cat_budget.category_id,
+                models.Transaction.type == "EXPENSE",
+                models.Transaction.is_deleted == False,
+                extract('year', models.Transaction.occurred_on) == year,
+                extract('month', models.Transaction.occurred_on) == month
+            ).scalar() or 0.0
+            
+            budgets.append({
+                "category": cat_budget.category.name,
+                "budget_amount": cat_budget.budget_amount,
+                "spent": spent
+            })
+    
+    # Convert transactions to response format
+    def format_transaction(t):
+        return {
+            "id": t.id,
+            "description": t.description,
+            "amount": t.amount,
+            "occurred_on": t.occurred_on,
+            "category": t.category.name if t.category else "Uncategorized",
+            "personal_share": t.personal_share,
+            "owed_share": t.owed_share,
+            "refunded": t.refunded,
+            "type": t.type
+        }
     
     return {
-        "total_income": total_income,
-        "total_expenses": total_expenses,
-        "balance": total_income - total_expenses,
-        "transactions_count": len(transactions),
-        "expenses_by_category": expenses_by_category
+        "expenses": [format_transaction(t) for t in expenses],
+        "income": [format_transaction(t) for t in income],
+        "savings": [format_transaction(t) for t in savings],
+        "budgets": budgets
     }
 
 
