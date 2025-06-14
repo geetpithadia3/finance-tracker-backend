@@ -30,10 +30,27 @@ def get_dashboard(
         extract('month', models.Transaction.occurred_on) == month
     ).all()
     
-    # Separate transactions by type
-    expenses = [t for t in all_transactions if t.type == "EXPENSE"]
-    income = [t for t in all_transactions if t.type == "INCOME"]
-    savings = [t for t in all_transactions if t.type == "SAVINGS"]
+    # Separate transactions by category-based logic
+    # Income: transactions in income categories OR positive CREDIT transactions that look like income
+    income_category_names = ['Income', 'Side Income', 'Investment Income', 'Other Income', 'Salary']
+    income_keywords = ['payroll', 'salary', 'wage', 'income', 'deposit', 'refund']
+    
+    income = []
+    for t in all_transactions:
+        # Include if categorized as income
+        if t.category and t.category.name in income_category_names:
+            income.append(t)
+        # Include positive CREDIT transactions with income-related descriptions
+        elif (t.type == "CREDIT" and t.amount > 0 and 
+              any(keyword in t.description.lower() for keyword in income_keywords)):
+            income.append(t)
+    
+    # Savings: transactions categorized as "Savings"
+    savings = [t for t in all_transactions if t.category and t.category.name == 'Savings']
+    
+    # Expenses: DEBIT transactions that are NOT categorized as "Transfer"
+    expenses = [t for t in all_transactions 
+               if t.type == "DEBIT" and (not t.category or (t.category.name != 'Transfer' and t.category.name != 'Savings'))]
     
     # Get budget data for this period
     budget = db.query(models.Budget).filter(
@@ -49,7 +66,7 @@ def get_dashboard(
             spent = db.query(func.sum(models.Transaction.amount)).filter(
                 models.Transaction.user_id == current_user.id,
                 models.Transaction.category_id == cat_budget.category_id,
-                models.Transaction.type == "EXPENSE",
+                models.Transaction.type == "DEBIT",
                 models.Transaction.is_deleted == False,
                 extract('year', models.Transaction.occurred_on) == year,
                 extract('month', models.Transaction.occurred_on) == month
@@ -63,14 +80,18 @@ def get_dashboard(
     
     # Convert transactions to response format
     def format_transaction(t):
+        # For CREDIT transactions, convert negative amounts to positive
+        amount = abs(t.amount) if t.type == "CREDIT" and t.amount < 0 else t.amount
+        personal_share = abs(t.personal_share) if t.type == "CREDIT" and t.personal_share < 0 else t.personal_share
+        
         return {
             "id": t.id,
             "description": t.description,
-            "amount": t.amount,
+            "amount": amount,
             "occurred_on": t.occurred_on,
             "date": t.occurred_on,  # Add date field for backward compatibility
             "category": t.category.name if t.category else "Uncategorized",
-            "personal_share": t.personal_share,
+            "personal_share": personal_share,
             "owed_share": t.owed_share,
             "refunded": t.refunded,
             "type": t.type
@@ -98,6 +119,7 @@ def get_expenses_by_category(
     year, month = map(int, year_month.split('-'))
     
     # Get expense transactions for specified month grouped by category
+    # Expenses are DEBIT transactions that are NOT categorized as "Transfer"
     result = db.query(
         models.Category.name.label('category_name'),
         func.sum(models.Transaction.amount).label('total_amount')
@@ -105,8 +127,9 @@ def get_expenses_by_category(
         models.Transaction, models.Transaction.category_id == models.Category.id
     ).filter(
         models.Transaction.user_id == current_user.id,
-        models.Transaction.type == "EXPENSE",
+        models.Transaction.type == "DEBIT",
         models.Transaction.is_deleted == False,
+        models.Category.name != "Transfer",
         extract('year', models.Transaction.occurred_on) == year,
         extract('month', models.Transaction.occurred_on) == month
     ).group_by(models.Category.name).all()
