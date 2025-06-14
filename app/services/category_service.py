@@ -18,6 +18,8 @@ class CategorySeedingService:
         {"name": "Groceries", "description": "Food shopping, household supplies"},
         {"name": "Transportation", "description": "Gas, car payments, public transit, maintenance"},
         {"name": "Insurance", "description": "Health, auto, life insurance premiums"},
+        # General catch-all
+        {"name": "General", "description": "General or uncategorized expenses"},
         
         # Lifestyle & Discretionary
         {"name": "Dining Out", "description": "Restaurants, takeout, coffee shops"},
