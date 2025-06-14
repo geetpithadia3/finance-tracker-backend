@@ -68,6 +68,7 @@ def get_dashboard(
             "description": t.description,
             "amount": t.amount,
             "occurred_on": t.occurred_on,
+            "date": t.occurred_on,  # Add date field for backward compatibility
             "category": t.category.name if t.category else "Uncategorized",
             "personal_share": t.personal_share,
             "owed_share": t.owed_share,

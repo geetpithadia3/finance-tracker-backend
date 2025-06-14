@@ -45,6 +45,9 @@ def update_category(
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")
     
+    if not category.is_editable:
+        raise HTTPException(status_code=403, detail="This category cannot be edited")
+    
     update_data = category_update.dict(exclude_unset=True)
     for field, value in update_data.items():
         setattr(category, field, value)
@@ -73,6 +76,51 @@ def seed_custom_categories(
     """Create custom categories for the current user"""
     categories = CategorySeedingService.seed_custom_categories(db, current_user.id, category_names)
     return categories
+
+
+@router.delete("/{category_id}")
+def delete_category(
+    category_id: str,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a category (only if it's editable)"""
+    category = db.query(models.Category).filter(
+        models.Category.id == category_id,
+        models.Category.user_id == current_user.id
+    ).first()
+    
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    if not category.is_editable:
+        raise HTTPException(status_code=403, detail="This category cannot be deleted")
+    
+    # Check if category is in use by transactions
+    transaction_count = db.query(models.Transaction).filter(
+        models.Transaction.category_id == category_id
+    ).count()
+    
+    if transaction_count > 0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot delete category. It is used by {transaction_count} transaction(s)."
+        )
+    
+    # Check if category is in use by recurring transactions
+    recurring_count = db.query(models.RecurringTransaction).filter(
+        models.RecurringTransaction.category_id == category_id
+    ).count()
+    
+    if recurring_count > 0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot delete category. It is used by {recurring_count} recurring transaction(s)."
+        )
+    
+    db.delete(category)
+    db.commit()
+    return {"message": "Category deleted successfully"}
 
 
 @router.get("/defaults")

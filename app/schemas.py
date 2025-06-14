@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 from typing import Union
@@ -35,15 +35,19 @@ class CategoryCreate(CategoryBase):
 
 class CategoryUpdate(BaseModel):
     name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class Category(CategoryBase):
     id: str
     user_id: str
+    isEditable: bool = Field(alias="is_editable")
+    isActive: bool = Field(alias="is_active")
     created_at: datetime
     
     class Config:
         from_attributes = True
+        populate_by_name = True
 
 
 class TransactionBase(BaseModel):

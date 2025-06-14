@@ -10,6 +10,11 @@ logger = logging.getLogger(__name__)
 class CategorySeedingService:
     """Service for seeding default categories for new users"""
     
+    # Categories that should not be editable by users
+    NON_EDITABLE_CATEGORIES = {
+        "Income", "Savings", "Transfer", "Credit Card Payment"
+    }
+    
     # Default categories that provide a good starting point for personal finance tracking
     DEFAULT_CATEGORIES = [
         # Essential Expenses
@@ -28,20 +33,19 @@ class CategorySeedingService:
         {"name": "Health & Fitness", "description": "Gym, medical, pharmacy, wellness"},
         {"name": "Travel", "description": "Vacations, trips, accommodation"},
         
-        # Financial & Investment
+        # Financial & Investment (some non-editable)
         {"name": "Savings", "description": "Emergency fund, general savings"},
         {"name": "Investments", "description": "Stocks, bonds, retirement contributions"},
         {"name": "Debt Payments", "description": "Credit cards, loans, student loans"},
+        {"name": "Credit Card Payment", "description": "Credit card payments and transfers"},
+        {"name": "Transfer", "description": "Money transfers between accounts"},
         
         # Personal Development
         {"name": "Education", "description": "Courses, books, training, subscriptions"},
         {"name": "Gifts & Donations", "description": "Presents, charity, religious donations"},
         
-        # Income Categories
-        {"name": "Salary", "description": "Primary job income"},
-        {"name": "Side Income", "description": "Freelancing, part-time work, gig economy"},
-        {"name": "Investment Income", "description": "Dividends, interest, capital gains"},
-        {"name": "Other Income", "description": "Bonuses, gifts received, miscellaneous income"}
+        # Income Categories (non-editable)
+        {"name": "Income", "description": "All income sources"},
     ]
     
     @staticmethod
@@ -70,9 +74,12 @@ class CategorySeedingService:
             
             # Create default categories
             for category_data in CategorySeedingService.DEFAULT_CATEGORIES:
+                is_editable = category_data["name"] not in CategorySeedingService.NON_EDITABLE_CATEGORIES
                 db_category = models.Category(
                     name=category_data["name"],
-                    user_id=user_id
+                    user_id=user_id,
+                    is_editable=is_editable,
+                    is_active=True
                 )
                 db.add(db_category)
                 created_categories.append(db_category)
@@ -126,9 +133,12 @@ class CategorySeedingService:
                 ).first()
                 
                 if not existing:
+                    is_editable = category_name not in CategorySeedingService.NON_EDITABLE_CATEGORIES
                     db_category = models.Category(
                         name=category_name,
-                        user_id=user_id
+                        user_id=user_id,
+                        is_editable=is_editable,
+                        is_active=True
                     )
                     db.add(db_category)
                     created_categories.append(db_category)

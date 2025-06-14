@@ -56,6 +56,8 @@ class Category(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String, nullable=False)
     user_id = Column(String, ForeignKey("users.id"))
+    is_editable = Column(Boolean, default=True, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=func.now())
     
     # Relationships

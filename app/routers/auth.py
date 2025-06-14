@@ -16,10 +16,9 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 @router.post("/register", response_model=schemas.User)
 def register(
     user: schemas.UserCreate, 
-    seed_categories: bool = True,
     db: Session = Depends(get_db)
 ):
-    """Register a new user with optional default category seeding"""
+    """Register a new user and automatically seed default categories"""
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Username already registered")
@@ -32,14 +31,13 @@ def register(
         db.commit()
         db.refresh(db_user)
         
-        # Seed default categories if requested
-        if seed_categories:
-            try:
-                categories = CategorySeedingService.seed_default_categories(db, db_user.id)
-                logger.info(f"Seeded {len(categories)} default categories for new user {db_user.username}")
-            except Exception as e:
-                logger.warning(f"Failed to seed categories for user {db_user.username}: {e}")
-                # Don't fail registration if category seeding fails
+        # Automatically seed default categories for new user
+        try:
+            categories = CategorySeedingService.seed_default_categories(db, db_user.id)
+            logger.info(f"Seeded {len(categories)} default categories for new user {db_user.username}")
+        except Exception as e:
+            logger.warning(f"Failed to seed categories for user {db_user.username}: {e}")
+            # Don't fail registration if category seeding fails
         
         return db_user
         
