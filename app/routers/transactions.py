@@ -2,11 +2,125 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import extract
 from typing import List, Union
+from datetime import datetime
 
 from app.database import get_db
 from app import models, schemas, auth
+from app.routers.recurring_transactions import calculate_next_due_date_enhanced
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
+
+
+def handle_recurrence_creation(transaction: models.Transaction, recurrence_data: schemas.RecurrenceData, db: Session):
+    """Create a new RecurringTransaction from transaction and recurrence data"""
+    try:
+        # Convert string enums to enum objects
+        frequency_enum = models.RecurrenceFrequency(recurrence_data.frequency)
+        flexibility_enum = models.DateFlexibility(recurrence_data.date_flexibility)
+        
+        # Calculate next due date
+        next_due_date = calculate_next_due_date_enhanced(
+            recurrence_data.start_date,
+            recurrence_data.frequency,
+            recurrence_data.date_flexibility
+        )
+        
+        # Create RecurringTransaction
+        recurring_transaction = models.RecurringTransaction(
+            description=transaction.description,
+            amount=transaction.amount,
+            type=transaction.type,
+            frequency=frequency_enum,
+            date_flexibility=flexibility_enum,
+            range_start=recurrence_data.range_start,
+            range_end=recurrence_data.range_end,
+            preference=recurrence_data.preference,
+            start_date=recurrence_data.start_date,
+            next_due_date=next_due_date,
+            is_variable_amount=recurrence_data.is_variable_amount or False,
+            estimated_min_amount=recurrence_data.estimated_min_amount,
+            estimated_max_amount=recurrence_data.estimated_max_amount,
+            user_id=transaction.user_id,
+            category_id=transaction.category_id,
+            source_transaction_id=transaction.id,
+            priority=models.TransactionPriority.MEDIUM  # Default priority
+        )
+        
+        db.add(recurring_transaction)
+        db.flush()  # Get the ID without committing
+        return recurring_transaction
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid recurrence data: {str(e)}")
+
+
+def handle_recurrence_update(transaction: models.Transaction, recurrence_data: schemas.RecurrenceData, db: Session):
+    """Update existing RecurringTransaction"""
+    recurring_transaction = db.query(models.RecurringTransaction).filter(
+        models.RecurringTransaction.id == recurrence_data.id,
+        models.RecurringTransaction.user_id == transaction.user_id
+    ).first()
+    
+    if not recurring_transaction:
+        raise HTTPException(status_code=404, detail="Recurring transaction not found")
+    
+    try:
+        # Convert string enums to enum objects
+        frequency_enum = models.RecurrenceFrequency(recurrence_data.frequency)
+        flexibility_enum = models.DateFlexibility(recurrence_data.date_flexibility)
+        
+        # Update fields
+        recurring_transaction.frequency = frequency_enum
+        recurring_transaction.date_flexibility = flexibility_enum
+        recurring_transaction.range_start = recurrence_data.range_start
+        recurring_transaction.range_end = recurrence_data.range_end
+        recurring_transaction.preference = recurrence_data.preference
+        recurring_transaction.start_date = recurrence_data.start_date
+        recurring_transaction.is_variable_amount = recurrence_data.is_variable_amount or False
+        recurring_transaction.estimated_min_amount = recurrence_data.estimated_min_amount
+        recurring_transaction.estimated_max_amount = recurrence_data.estimated_max_amount
+        
+        # Recalculate next due date
+        recurring_transaction.next_due_date = calculate_next_due_date_enhanced(
+            recurrence_data.start_date,
+            recurrence_data.frequency,
+            recurrence_data.date_flexibility
+        )
+        
+        return recurring_transaction
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid recurrence data: {str(e)}")
+
+
+def handle_recurrence_removal(transaction: models.Transaction, db: Session):
+    """Remove RecurringTransaction associated with this transaction"""
+    recurring_transaction = db.query(models.RecurringTransaction).filter(
+        models.RecurringTransaction.source_transaction_id == transaction.id,
+        models.RecurringTransaction.user_id == transaction.user_id
+    ).first()
+    
+    if recurring_transaction:
+        db.delete(recurring_transaction)
+
+
+def convert_recurring_to_recurrence_data(recurring_transaction: models.RecurringTransaction) -> schemas.RecurrenceData:
+    """Convert RecurringTransaction model to RecurrenceData schema"""
+    if not recurring_transaction:
+        return None
+        
+    return schemas.RecurrenceData(
+        id=recurring_transaction.id,
+        frequency=recurring_transaction.frequency.value,
+        start_date=recurring_transaction.start_date,
+        date_flexibility=recurring_transaction.date_flexibility.value,
+        range_start=recurring_transaction.range_start,
+        range_end=recurring_transaction.range_end,
+        preference=recurring_transaction.preference,
+        is_variable_amount=recurring_transaction.is_variable_amount,
+        estimated_min_amount=recurring_transaction.estimated_min_amount,
+        estimated_max_amount=recurring_transaction.estimated_max_amount
+    )
 
 
 @router.post("")
@@ -52,10 +166,34 @@ def list_transactions(
     current_user: models.User = Depends(auth.get_current_user),
     db: Session = Depends(get_db)
 ):
-    return db.query(models.Transaction).filter(
+    transactions = db.query(models.Transaction).filter(
         models.Transaction.user_id == current_user.id,
         models.Transaction.is_deleted == False
     ).all()
+    
+    # Build response with recurrence data
+    response_transactions = []
+    for transaction in transactions:
+        transaction_dict = {
+            "id": transaction.id,
+            "type": transaction.type,
+            "description": transaction.description,
+            "amount": transaction.amount,
+            "occurred_on": transaction.occurred_on,
+            "personal_share": transaction.personal_share,
+            "owed_share": transaction.owed_share,
+            "share_metadata": transaction.share_metadata,
+            "user_id": transaction.user_id,
+            "category_id": transaction.category_id,
+            "is_deleted": transaction.is_deleted,
+            "refunded": transaction.refunded,
+            "created_at": transaction.created_at,
+            "category": transaction.category,
+            "recurrence": convert_recurring_to_recurrence_data(transaction.recurring_transaction) if transaction.recurring_transaction else None
+        }
+        response_transactions.append(schemas.Transaction(**transaction_dict))
+    
+    return response_transactions
 
 
 @router.put("")
@@ -89,7 +227,22 @@ def update_transactions(
             if not category:
                 raise HTTPException(status_code=404, detail=f"Category {update.category_id} not found")
         
-        update_data = update.dict(exclude_unset=True, exclude={'id'})
+        # Handle recurrence data
+        if hasattr(update, 'recurrence'):
+            if update.recurrence is not None:
+                # Create or update recurrence
+                if update.recurrence.id:
+                    # Update existing recurrence
+                    handle_recurrence_update(transaction, update.recurrence, db)
+                else:
+                    # Create new recurrence
+                    handle_recurrence_creation(transaction, update.recurrence, db)
+            else:
+                # Remove recurrence (recurrence is explicitly None)
+                handle_recurrence_removal(transaction, db)
+        
+        # Update regular transaction fields (exclude recurrence from the update)
+        update_data = update.dict(exclude_unset=True, exclude={'id', 'recurrence'})
         for field, value in update_data.items():
             setattr(transaction, field, value)
         
@@ -97,14 +250,39 @@ def update_transactions(
     
     db.commit()
     
-    # Refresh all transactions
+    # Refresh all transactions and build response with recurrence data
     for transaction in updated_transactions:
         db.refresh(transaction)
+        # Load the recurring transaction relationship if it exists
+        if transaction.recurring_transaction:
+            db.refresh(transaction.recurring_transaction)
+    
+    # Build response transactions with recurrence data
+    response_transactions = []
+    for transaction in updated_transactions:
+        transaction_dict = {
+            "id": transaction.id,
+            "type": transaction.type,
+            "description": transaction.description,
+            "amount": transaction.amount,
+            "occurred_on": transaction.occurred_on,
+            "personal_share": transaction.personal_share,
+            "owed_share": transaction.owed_share,
+            "share_metadata": transaction.share_metadata,
+            "user_id": transaction.user_id,
+            "category_id": transaction.category_id,
+            "is_deleted": transaction.is_deleted,
+            "refunded": transaction.refunded,
+            "created_at": transaction.created_at,
+            "category": transaction.category,
+            "recurrence": convert_recurring_to_recurrence_data(transaction.recurring_transaction) if transaction.recurring_transaction else None
+        }
+        response_transactions.append(schemas.Transaction(**transaction_dict))
     
     # Return single transaction if input was single, otherwise return list
-    if len(updated_transactions) == 1:
-        return updated_transactions[0]
-    return updated_transactions
+    if len(response_transactions) == 1:
+        return response_transactions[0]
+    return response_transactions
 
 
 @router.put("/{transaction_id}", response_model=schemas.Transaction)
@@ -135,4 +313,26 @@ def list_transactions_by_month(
         extract('month', models.Transaction.occurred_on) == request.month
     ).all()
     
-    return transactions
+    # Build response with recurrence data
+    response_transactions = []
+    for transaction in transactions:
+        transaction_dict = {
+            "id": transaction.id,
+            "type": transaction.type,
+            "description": transaction.description,
+            "amount": transaction.amount,
+            "occurred_on": transaction.occurred_on,
+            "personal_share": transaction.personal_share,
+            "owed_share": transaction.owed_share,
+            "share_metadata": transaction.share_metadata,
+            "user_id": transaction.user_id,
+            "category_id": transaction.category_id,
+            "is_deleted": transaction.is_deleted,
+            "refunded": transaction.refunded,
+            "created_at": transaction.created_at,
+            "category": transaction.category,
+            "recurrence": convert_recurring_to_recurrence_data(transaction.recurring_transaction) if transaction.recurring_transaction else None
+        }
+        response_transactions.append(schemas.Transaction(**transaction_dict))
+    
+    return response_transactions

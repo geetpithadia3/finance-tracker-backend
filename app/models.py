@@ -88,6 +88,7 @@ class Transaction(Base):
     # Relationships
     user = relationship("User", back_populates="transactions")
     category = relationship("Category", back_populates="transactions")
+    recurring_transaction = relationship("RecurringTransaction", back_populates="source_transaction", uselist=False)
 
 
 class Budget(Base):
@@ -129,6 +130,11 @@ class RecurringTransaction(Base):
     date_flexibility = Column(Enum(DateFlexibility), nullable=False, default=DateFlexibility.EXACT)
     priority = Column(Enum(TransactionPriority), nullable=False, default=TransactionPriority.MEDIUM)
     
+    # Date flexibility specific fields
+    range_start = Column(Integer)  # For CUSTOM_RANGE flexibility
+    range_end = Column(Integer)    # For CUSTOM_RANGE flexibility
+    preference = Column(String)    # For day of week, season, etc.
+    
     # Date management
     start_date = Column(DateTime, nullable=False)
     end_date = Column(DateTime)  # Optional end date
@@ -149,7 +155,9 @@ class RecurringTransaction(Base):
     # Foreign keys
     user_id = Column(String, ForeignKey("users.id"))
     category_id = Column(String, ForeignKey("categories.id"))
+    source_transaction_id = Column(String, ForeignKey("transactions.id"), nullable=True)
     
     # Relationships
     user = relationship("User", back_populates="recurring_transactions")
     category = relationship("Category", back_populates="recurring_transactions")
+    source_transaction = relationship("Transaction", back_populates="recurring_transaction")

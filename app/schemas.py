@@ -64,6 +64,19 @@ class TransactionCreate(TransactionBase):
     category_id: str
 
 
+class RecurrenceData(BaseModel):
+    id: Optional[str] = None
+    frequency: str
+    start_date: datetime
+    date_flexibility: Optional[str] = "EXACT"
+    range_start: Optional[int] = None
+    range_end: Optional[int] = None
+    preference: Optional[str] = None
+    is_variable_amount: Optional[bool] = False
+    estimated_min_amount: Optional[float] = None
+    estimated_max_amount: Optional[float] = None
+
+
 class TransactionUpdate(BaseModel):
     id: str
     description: Optional[str] = None
@@ -75,6 +88,7 @@ class TransactionUpdate(BaseModel):
     personal_share: Optional[float] = None
     owed_share: Optional[float] = None
     share_metadata: Optional[str] = None
+    recurrence: Optional[RecurrenceData] = None
 
 
 class Transaction(TransactionBase):
@@ -85,6 +99,7 @@ class Transaction(TransactionBase):
     refunded: bool
     created_at: datetime
     category: Optional[Category] = None
+    recurrence: Optional[RecurrenceData] = None
     
     class Config:
         from_attributes = True

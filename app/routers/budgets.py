@@ -231,7 +231,7 @@ def download_budget_report(
     # Get budget comparison data
     budgets = db.query(models.Budget).filter(
         models.Budget.user_id == current_user.id,
-        models.Budget.period == "MONTHLY"
+        models.Budget.year_month == f"{year}-{month:02d}"
     ).all()
     
     # Get transactions for the specified month
@@ -268,27 +268,47 @@ def download_budget_report(
         # Budget data
         total_budgeted = 0.0
         for budget in budgets:
-            spent_amount = total_spent  # Simplified: assume budget covers all expenses
-            remaining = budget.amount - spent_amount
-            percentage_used = (spent_amount / budget.amount * 100) if budget.amount > 0 else 0
+            # Get category budgets for this budget
+            category_budgets = db.query(models.CategoryBudget).filter(
+                models.CategoryBudget.budget_id == budget.id
+            ).all()
             
-            if percentage_used >= 100:
-                status = "Over Budget"
-            elif percentage_used >= 80:
-                status = "Near Limit" 
-            else:
-                status = "Under Budget"
-            
-            writer.writerow([
-                budget.name,
-                f"${budget.amount:.2f}",
-                f"${spent_amount:.2f}",
-                f"${remaining:.2f}",
-                f"{percentage_used:.1f}%",
-                status
-            ])
-            
-            total_budgeted += budget.amount
+            for category_budget in category_budgets:
+                # Get category name
+                category = db.query(models.Category).filter(
+                    models.Category.id == category_budget.category_id
+                ).first()
+                
+                # Calculate spent amount for this category
+                category_spent = db.query(models.Transaction).filter(
+                    models.Transaction.user_id == current_user.id,
+                    models.Transaction.is_deleted == False,
+                    models.Transaction.type == "EXPENSE",
+                    models.Transaction.category_id == category_budget.category_id,
+                    extract('year', models.Transaction.occurred_on) == year,
+                    extract('month', models.Transaction.occurred_on) == month
+                ).with_entities(func.coalesce(func.sum(models.Transaction.amount), 0)).scalar()
+                
+                remaining = category_budget.budget_amount - category_spent
+                percentage_used = (category_spent / category_budget.budget_amount * 100) if category_budget.budget_amount > 0 else 0
+                
+                if percentage_used >= 100:
+                    status = "Over Budget"
+                elif percentage_used >= 80:
+                    status = "Near Limit" 
+                else:
+                    status = "Under Budget"
+                
+                writer.writerow([
+                    category.name if category else "Unknown Category",
+                    f"${category_budget.budget_amount:.2f}",
+                    f"${category_spent:.2f}",
+                    f"${remaining:.2f}",
+                    f"{percentage_used:.1f}%",
+                    status
+                ])
+                
+                total_budgeted += category_budget.budget_amount
         
         # Summary
         writer.writerow([])  # Empty row
@@ -318,27 +338,47 @@ def download_budget_report(
         total_budgeted = 0.0
         
         for budget in budgets:
-            spent_amount = total_spent  # Simplified
-            remaining = budget.amount - spent_amount
-            percentage_used = (spent_amount / budget.amount * 100) if budget.amount > 0 else 0
+            # Get category budgets for this budget
+            category_budgets = db.query(models.CategoryBudget).filter(
+                models.CategoryBudget.budget_id == budget.id
+            ).all()
             
-            if percentage_used >= 100:
-                status = "over_budget"
-            elif percentage_used >= 80:
-                status = "near_limit"
-            else:
-                status = "under_budget"
-            
-            budget_data.append({
-                "budget_name": budget.name,
-                "budget_amount": budget.amount,
-                "spent_amount": spent_amount,
-                "remaining_amount": remaining,
-                "percentage_used": percentage_used,
-                "status": status
-            })
-            
-            total_budgeted += budget.amount
+            for category_budget in category_budgets:
+                # Get category name
+                category = db.query(models.Category).filter(
+                    models.Category.id == category_budget.category_id
+                ).first()
+                
+                # Calculate spent amount for this category
+                category_spent = db.query(models.Transaction).filter(
+                    models.Transaction.user_id == current_user.id,
+                    models.Transaction.is_deleted == False,
+                    models.Transaction.type == "EXPENSE",
+                    models.Transaction.category_id == category_budget.category_id,
+                    extract('year', models.Transaction.occurred_on) == year,
+                    extract('month', models.Transaction.occurred_on) == month
+                ).with_entities(func.coalesce(func.sum(models.Transaction.amount), 0)).scalar()
+                
+                remaining = category_budget.budget_amount - category_spent
+                percentage_used = (category_spent / category_budget.budget_amount * 100) if category_budget.budget_amount > 0 else 0
+                
+                if percentage_used >= 100:
+                    status = "over_budget"
+                elif percentage_used >= 80:
+                    status = "near_limit"
+                else:
+                    status = "under_budget"
+                
+                budget_data.append({
+                    "budget_name": category.name if category else "Unknown Category",
+                    "budget_amount": category_budget.budget_amount,
+                    "spent_amount": category_spent,
+                    "remaining_amount": remaining,
+                    "percentage_used": percentage_used,
+                    "status": status
+                })
+                
+                total_budgeted += category_budget.budget_amount
         
         return {
             "period": f"{year}-{month:02d}",
@@ -350,6 +390,73 @@ def download_budget_report(
                 "percentage_used": (total_spent / total_budgeted * 100) if total_budgeted > 0 else 0
             }
         }
+
+
+@router.put("/{budget_id}", response_model=schemas.BudgetResponse)
+def update_budget(
+    budget_id: str,
+    budget_update: schemas.BudgetCreate,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Get existing budget
+    budget = db.query(models.Budget).filter(
+        models.Budget.id == budget_id,
+        models.Budget.user_id == current_user.id
+    ).first()
+    
+    if not budget:
+        raise HTTPException(status_code=404, detail="Budget not found")
+    
+    # Delete existing category budgets
+    db.query(models.CategoryBudget).filter(
+        models.CategoryBudget.budget_id == budget_id
+    ).delete()
+    
+    # Create new category budgets
+    for category_budget in budget_update.category_limits:
+        new_category_budget = models.CategoryBudget(
+            budget_id=budget_id,
+            category_id=category_budget.category_id,
+            budget_amount=category_budget.budget_amount
+        )
+        db.add(new_category_budget)
+    
+    # Update budget year_month if provided
+    if budget_update.year_month:
+        budget.year_month = budget_update.year_month
+    
+    db.commit()
+    db.refresh(budget)
+    
+    return budget
+
+
+@router.delete("/{budget_id}")
+def delete_budget(
+    budget_id: str,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Get existing budget
+    budget = db.query(models.Budget).filter(
+        models.Budget.id == budget_id,
+        models.Budget.user_id == current_user.id
+    ).first()
+    
+    if not budget:
+        raise HTTPException(status_code=404, detail="Budget not found")
+    
+    # Delete category budgets (cascade should handle this, but let's be explicit)
+    db.query(models.CategoryBudget).filter(
+        models.CategoryBudget.budget_id == budget_id
+    ).delete()
+    
+    # Delete budget
+    db.delete(budget)
+    db.commit()
+    
+    return {"message": "Budget deleted successfully"}
 
 
 @router.get("/categories")
