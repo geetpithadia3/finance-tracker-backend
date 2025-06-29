@@ -59,6 +59,11 @@ def create_tables():
     """Create all tables"""
     logger.info(f"Creating tables for {settings.database_profile} database")
     logger.info(f"Database URL: {settings.database_url}")
+    
+    # Import models to ensure they're registered with Base
+    from app import models
+    
+    logger.info(f"Creating tables: {list(Base.metadata.tables.keys())}")
     Base.metadata.create_all(bind=engine)
 
 

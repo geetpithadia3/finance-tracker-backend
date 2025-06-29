@@ -151,7 +151,7 @@ def create_transactions(
     
     db.commit()
     
-    # Refresh all transactions
+    # Refresh created transactions
     for transaction in created_transactions:
         db.refresh(transaction)
     
@@ -336,3 +336,26 @@ def list_transactions_by_month(
         response_transactions.append(schemas.Transaction(**transaction_dict))
     
     return response_transactions
+
+
+@router.post("/budget-impact-preview")
+def preview_budget_impact(
+    transaction_data: schemas.TransactionCreate,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Preview how a transaction would impact budgets before creating it"""
+    # Verify category belongs to user
+    category = db.query(models.Category).filter(
+        models.Category.id == transaction_data.category_id,
+        models.Category.user_id == current_user.id
+    ).first()
+    
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    # Simple preview without complex budget integration
+    if transaction_data.type != "EXPENSE":
+        return {"affected_budgets": [], "warnings": [], "message": "Non-expense transactions don't affect budgets"}
+    
+    return {"message": "Budget impact preview not available in simplified mode"}
