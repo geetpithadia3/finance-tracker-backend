@@ -6,16 +6,14 @@ class CategoryBudgetCreate(BaseModel):
     category_id: str
     budget_amount: float
     # REQ-004: Rollover Configuration
-    rollover_unused: Optional[bool] = False
-    rollover_overspend: Optional[bool] = False
+    rollover_enabled: Optional[bool] = False
 
 class CategoryBudgetResponse(BaseModel):
     id: str
     category_id: str
     budget_amount: float
     # REQ-004: Rollover Configuration
-    rollover_unused: bool
-    rollover_overspend: bool
+    rollover_enabled: bool
     rollover_amount: float
     class Config:
         from_attributes = True
@@ -74,7 +72,6 @@ class ProjectBudgetResponse(BaseModel):
     end_date: datetime
     total_amount: float
     created_at: datetime
-    is_active: bool
     category_allocations: List[ProjectBudgetAllocationResponse]
     class Config:
         from_attributes = True
@@ -91,7 +88,6 @@ class ProjectBudgetProgress(BaseModel):
     progress_percentage: float
     days_remaining: int
     category_progress: List[dict]
-    is_active: bool
 
 class User(BaseModel):
     id: str
@@ -142,6 +138,8 @@ class RecurringTransaction(BaseModel):
     next_due_date: datetime
     date_flexibility: str
     is_active: bool
+    category: Optional[Category] = None
+    priority: Optional[str] = None
     class Config:
         from_attributes = True
 
@@ -161,6 +159,12 @@ class RecurrenceData(BaseModel):
     frequency: str
     start_date: datetime
     date_flexibility: Optional[str] = "EXACT"
+    range_start: Optional[int] = None
+    range_end: Optional[int] = None
+    preference: Optional[str] = None
+    is_variable_amount: Optional[bool] = False
+    estimated_min_amount: Optional[float] = None
+    estimated_max_amount: Optional[float] = None
 
 class TransactionCreate(BaseModel):
     category_id: str
@@ -176,6 +180,11 @@ class TransactionUpdate(BaseModel):
     description: Optional[str] = None
     amount: Optional[float] = None
     occurred_on: Optional[datetime] = None
+    refunded: Optional[bool] = None
+    personal_share: Optional[float] = None
+    owed_share: Optional[float] = None
+    share_metadata: Optional[str] = None
+    recurrence: Optional[RecurrenceData] = None
 
 class Transaction(BaseModel):
     id: str
@@ -185,6 +194,13 @@ class Transaction(BaseModel):
     amount: float
     occurred_on: datetime
     is_deleted: bool
+    refunded: Optional[bool] = False
+    personal_share: Optional[float] = None
+    owed_share: Optional[float] = None
+    share_metadata: Optional[str] = None
+    created_at: Optional[datetime] = None
+    category: Optional[Category] = None
+    recurrence: Optional[RecurrenceData] = None
     class Config:
         from_attributes = True
 
@@ -206,7 +222,31 @@ class ListExpensesByMonthRequest(BaseModel):
     year: int
     month: int
 
+class UpcomingExpense(BaseModel):
+    id: str
+    description: str
+    amount: float
+    due_date: datetime
+    category: str
+    is_recurring: bool = True
+    variability_factor: Optional[float] = 0.0
+    is_variable_amount: Optional[bool] = False
+    estimated_min_amount: Optional[float] = None
+    estimated_max_amount: Optional[float] = None
+
+class PaycheckAllocation(BaseModel):
+    id: str
+    amount: float
+    date: datetime
+    source: str
+    frequency: str
+    expenses: List[UpcomingExpense]
+    total_allocation_amount: float
+    remaining_amount: float
+    next_paycheck_date: Optional[datetime] = None
+
 class AllocationResponse(BaseModel):
+    paychecks: List[PaycheckAllocation] = []
     income: float = 0.0
     total_expenses: float = 0.0
     savings: float = 0.0

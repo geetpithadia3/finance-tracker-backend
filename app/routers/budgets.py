@@ -1,51 +1,340 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, extract
-from typing import List, Optional
-from datetime import datetime, date
+from sqlalchemy import and_, extract, func
+from typing import List, Optional, Dict, Any
+from datetime import datetime
 import calendar
 import logging
-import traceback
+import asyncio
 
 from ..database import get_db
-from ..models import Budget, CategoryBudget, Transaction, Category, User, ProjectBudget, ProjectBudgetAllocation
+from ..models import Budget, CategoryBudget, Transaction, Category, User, ProjectBudget, ProjectBudgetAllocation, RolloverCalculation
 from ..schemas import (
     BudgetCreate, BudgetUpdate, BudgetResponse, BudgetCopyRequest,
-    CategoryBudgetResponse, ProjectBudgetCreate, ProjectBudgetUpdate, 
-    ProjectBudgetResponse, ProjectBudgetProgress
+    ProjectBudgetCreate, ProjectBudgetUpdate, ProjectBudgetResponse, ProjectBudgetProgress
 )
 from ..auth import get_current_user
+from app.websockets import broadcast_rollover_update
 
-# Configure logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
 router = APIRouter(prefix="/budgets", tags=["budgets"])
 
-@router.get("/projects/test")
-def test_projects_route():
-    """Test endpoint to verify /budgets/projects routing works"""
-    logger.info("TEST: /budgets/projects/test endpoint accessed successfully")
-    return {"message": "Projects route is working", "status": "success", "timestamp": datetime.now().isoformat()}
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 
-def check_budget_overlap(db: Session, user_id: str, category_id: str, start_date: datetime, end_date: datetime, exclude_budget_id: str = None):
-    """
-    Check if a category has overlapping budget periods for the given date range.
-    Returns list of conflicting budgets if any overlap is found.
-    """
+def get_spending_for_category(db: Session, user_id: str, category_id: str, 
+                            start_date: datetime, end_date: datetime) -> float:
+    """Get total spending for a category in the given date range"""
+    transactions = db.query(Transaction).filter(
+        and_(
+            Transaction.user_id == user_id,
+            Transaction.category_id == category_id,
+            Transaction.occurred_on >= start_date,
+            Transaction.occurred_on <= end_date,
+            Transaction.amount < 0,  # Only expenses
+            Transaction.is_deleted == False
+        )
+    ).all()
+    
+    return abs(sum(t.amount for t in transactions))
+
+def calculate_month_dates(year_month: str) -> tuple[datetime, datetime]:
+    """Calculate start and end dates for a month"""
+    year, month = map(int, year_month.split('-'))
+    start_date = datetime(year, month, 1)
+    last_day = calendar.monthrange(year, month)[1]
+    end_date = datetime(year, month, last_day, 23, 59, 59)
+    return start_date, end_date
+
+def get_category_names(db: Session, category_ids: List[str]) -> Dict[str, str]:
+    """Get category names for given IDs"""
+    categories = db.query(Category).filter(Category.id.in_(category_ids)).all()
+    return {cat.id: cat.name for cat in categories}
+
+def calculate_rollover_amount(db: Session, user_id: str, category_id: str, current_month: str, 
+                            record_history: bool = True) -> float:
+    """Calculate rollover amount from previous month"""
+    try:
+        year, month = map(int, current_month.split('-'))
+        
+        # Get previous month
+        if month == 1:
+            prev_year, prev_month = year - 1, 12
+        else:
+            prev_year, prev_month = year, month - 1
+        
+        prev_year_month = f"{prev_year}-{prev_month:02d}"
+        
+        # Get previous month's budget
+        prev_budget = db.query(Budget).filter(
+            and_(Budget.user_id == user_id, Budget.year_month == prev_year_month)
+        ).first()
+        
+        if not prev_budget:
+            return 0.0
+        
+        # Get category budget for previous month
+        prev_category_budget = db.query(CategoryBudget).filter(
+            and_(
+                CategoryBudget.budget_id == prev_budget.id,
+                CategoryBudget.category_id == category_id
+            )
+        ).first()
+        
+        if not prev_category_budget:
+            return 0.0
+        
+        # Calculate spending for previous month
+        start_date, end_date = calculate_month_dates(prev_year_month)
+        spent_amount = get_spending_for_category(db, user_id, category_id, start_date, end_date)
+        
+        # Calculate rollover based on configuration
+        # CRITICAL FIX: Use effective budget (base + previous rollover) instead of just base budget
+        prev_effective_budget = prev_category_budget.budget_amount + (prev_category_budget.rollover_amount or 0.0)
+        difference = prev_effective_budget - spent_amount
+        
+        # Log rollover calculation for debugging
+        logger.info(f"Rollover calculation for category {category_id} from {prev_year_month} to {current_month}: "
+                   f"base_budget=${prev_category_budget.budget_amount}, "
+                   f"prev_rollover=${prev_category_budget.rollover_amount or 0.0}, "
+                   f"effective_budget=${prev_effective_budget}, "
+                   f"spent=${spent_amount}, difference=${difference}")
+        
+        rollover_amount = 0.0
+        if difference > 0 and prev_category_budget.rollover_enabled:
+            logger.info(f"Applying positive rollover: ${difference}")
+            rollover_amount = difference  # Positive rollover (unused funds)
+        elif difference < 0 and prev_category_budget.rollover_enabled:
+            logger.info(f"Applying negative rollover: ${difference}")
+            rollover_amount = difference  # Negative rollover (overspend)
+        else:
+            logger.info(f"No rollover applied (enabled={prev_category_budget.rollover_enabled})")
+        
+        # Note: History recording will be done by the calling function after budget creation
+        
+        return rollover_amount, prev_category_budget.budget_amount, prev_category_budget.rollover_amount or 0.0, prev_effective_budget, spent_amount
+    except Exception as e:
+        logger.warning(f"Could not calculate rollover for category {category_id}: {e}")
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+def record_rollover_calculation(db: Session, budget_id: str, category_id: str, 
+                              rollover_amount: float, source_month: str, 
+                              calculation_reason: str, base_budget: Optional[float] = None,
+                              prev_rollover: Optional[float] = None, effective_budget: Optional[float] = None,
+                              spent_amount: Optional[float] = None):
+    """Record rollover calculation in history table"""
+    try:
+        
+        calculation = RolloverCalculation(
+            budget_id=budget_id,
+            category_id=category_id,
+            rollover_amount=rollover_amount,
+            source_month=source_month,
+            calculation_reason=calculation_reason,
+            base_budget=base_budget,
+            prev_rollover=prev_rollover,
+            effective_budget=effective_budget,
+            spent_amount=spent_amount
+        )
+        
+        db.add(calculation)
+        # Note: Don't commit here, let the calling function handle the transaction
+        logger.info(f"Recorded rollover calculation: {rollover_amount} for category {category_id} from {source_month}")
+        
+    except Exception as e:
+        logger.warning(f"Failed to record rollover calculation: {e}")
+
+def mark_rollover_for_recalculation(db: Session, budget_id: str, reason: str = "data_change"):
+    """Mark a budget as needing rollover recalculation"""
+    try:
+        
+        budget = db.query(Budget).filter(Budget.id == budget_id).first()
+        if budget:
+            budget.rollover_needs_recalc = True
+            logger.info(f"Marked budget {budget_id} for rollover recalculation: {reason}")
+            
+    except Exception as e:
+        logger.warning(f"Failed to mark budget for recalculation: {e}")
+
+def invalidate_rollover_chain(db: Session, user_id: str, changed_month: str, reason: str = "transaction_change"):
+    """Invalidate rollover calculations for all months after the changed month"""
+    try:
+        
+        # Get all budgets after the changed month for this user
+        budgets = db.query(Budget).filter(
+            and_(
+                Budget.user_id == user_id,
+                Budget.year_month > changed_month
+            )
+        ).all()
+        
+        for budget in budgets:
+            budget.rollover_needs_recalc = True
+            logger.info(f"Invalidated rollover for budget {budget.year_month} due to {reason} in {changed_month}")
+            
+    except Exception as e:
+        logger.warning(f"Failed to invalidate rollover chain: {e}")
+
+@router.get("/{year_month}/rollover-status")
+def get_rollover_status(
+    year_month: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get rollover calculation status for a budget"""
+    budget = db.query(Budget).filter(
+        and_(
+            Budget.user_id == current_user.id,
+            Budget.year_month == year_month
+        )
+    ).first()
+    
+    if not budget:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Budget not found for {year_month}"
+        )
+    
+    return {
+        "year_month": year_month,
+        "rollover_last_calculated": budget.rollover_last_calculated,
+        "rollover_needs_recalc": budget.rollover_needs_recalc,
+        "calculation_pending": budget.rollover_needs_recalc and budget.rollover_last_calculated is None
+    }
+
+def _perform_rollover_recalculation(db: Session, user_id: str, year_month: str, reason: str = "system_recalculation"):
+    """Internal function to perform rollover recalculation for a specific month."""
+    budget = db.query(Budget).filter(
+        and_(
+            Budget.user_id == user_id,
+            Budget.year_month == year_month
+        )
+    ).first()
+
+    if not budget:
+        logger.info(f"No budget found for {year_month} for user {user_id}. Skipping recalculation.")
+        return {"message": f"Budget not found for {year_month}", "updated_categories": 0}
+
+    updated_categories = 0
+    try:
+        for category_budget in budget.category_limits:
+            old_rollover = category_budget.rollover_amount or 0.0
+            new_rollover, base_budget, prev_rollover, effective_budget, spent_amount = calculate_rollover_amount(
+                db, user_id, category_budget.category_id, year_month, record_history=False
+            )
+
+            if abs(new_rollover - old_rollover) > 0.01:  # Only update if significant change
+                category_budget.rollover_amount = new_rollover
+                updated_categories += 1
+
+                # Record the recalculation in history
+                try:
+                    # Get previous month for history record
+                    year_int, month_int = map(int, year_month.split('-'))
+                    if month_int == 1:
+                        prev_year, prev_month = year_int - 1, 12
+                    else:
+                        prev_year, prev_month = year_int, month_int - 1
+                    prev_year_month = f"{prev_year}-{prev_month:02d}"
+
+                    record_rollover_calculation(
+                        db, budget.id, category_budget.category_id, 
+                        new_rollover, prev_year_month,
+                        reason, base_budget, prev_rollover, effective_budget, spent_amount
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to record rollover recalculation history for {year_month}, category {category_budget.category_id}: {e}")
+
+        # Mark as recalculated
+        budget.rollover_last_calculated = func.now()
+        budget.rollover_needs_recalc = False
+
+        db.commit() # Commit changes for this budget
+
+        logger.info(f"Recalculated rollover for {year_month}: {updated_categories} categories updated")
+
+        return {
+            "message": f"Rollover recalculated for {year_month}",
+            "updated_categories": updated_categories,
+            "recalculated_at": budget.rollover_last_calculated
+        }
+
+    except Exception as e:
+        db.rollback() # Rollback if any error occurs during this budget's recalculation
+        logger.error(f"Failed to recalculate rollover for {year_month}: {e}")
+        raise
+
+@router.post("/{year_month}/recalculate-rollover")
+def recalculate_rollover_endpoint(
+    year_month: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """API endpoint to force recalculation of rollover for a specific month."""
+    try:
+        result = _perform_rollover_recalculation(db, current_user.id, year_month, "manual_recalculation")
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to recalculate rollover: {str(e)}"
+        )
+
+def invalidate_rollover_chain(db: Session, user_id: str, changed_month: str, reason: str = "transaction_change"):
+    """Invalidate and trigger recalculation for rollover calculations for all months after the changed month."""
+    try:
+        # Get all budgets after the changed month for this user, ordered chronologically
+        budgets_to_recalc = db.query(Budget).filter(
+            and_(
+                Budget.user_id == user_id,
+                Budget.year_month > changed_month
+            )
+        ).order_by(Budget.year_month).all()
+
+        for budget in budgets_to_recalc:
+            logger.info(f"Invalidating and recalculating rollover for budget {budget.year_month} due to {reason} in {changed_month}")
+            # Mark as needing recalculation (even if we recalculate immediately, this flag is useful)
+            budget.rollover_needs_recalc = True
+            db.flush() # Flush to ensure the flag is set before recalculation
+
+            # Perform recalculation for this month
+            try:
+                _perform_rollover_recalculation(db, user_id, budget.year_month, reason)
+            except Exception as e:
+                logger.error(f"Error during chained rollover recalculation for {budget.year_month}: {e}")
+                # Continue to next month even if one fails, but log the error
+                db.rollback() # Rollback any partial changes for this budget
+                # Re-fetch the budget to ensure it's not in a detached state if rollback occurred
+                budget = db.query(Budget).filter(Budget.id == budget.id).first()
+                if budget:
+                    budget.rollover_needs_recalc = True # Mark again if recalculation failed
+                    db.flush()
+
+        db.commit() # Final commit for all invalidations and recalculations
+        logger.info(f"Rollover chain invalidation and recalculation completed for months after {changed_month}.")
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to invalidate and recalculate rollover chain: {e}")
+
+def check_budget_conflicts(db: Session, user_id: str, category_id: str, 
+                         start_date: datetime, end_date: datetime, 
+                         exclude_budget_id: str = None) -> List[Dict]:
+    """Check for budget overlap conflicts"""
     conflicts = []
     
-    # Check monthly budgets for overlap
+    # Check monthly budgets
     monthly_budgets = db.query(Budget).filter(
         and_(
             Budget.user_id == user_id,
-            Budget.is_active == True,
             Budget.id != exclude_budget_id if exclude_budget_id else True
         )
     ).all()
     
     for budget in monthly_budgets:
-        # Check if this budget has the category
         category_budget = db.query(CategoryBudget).filter(
             and_(
                 CategoryBudget.budget_id == budget.id,
@@ -54,267 +343,88 @@ def check_budget_overlap(db: Session, user_id: str, category_id: str, start_date
         ).first()
         
         if category_budget:
-            # Calculate monthly budget date range
-            year, month = map(int, budget.year_month.split('-'))
-            budget_start = datetime(year, month, 1)
-            # Get last day of the month
-            last_day = calendar.monthrange(year, month)[1]
-            budget_end = datetime(year, month, last_day, 23, 59, 59)
-            
-            # Check for overlap
-            if not (end_date < budget_start or start_date > budget_end):
+            month_start, month_end = calculate_month_dates(budget.year_month)
+            if not (end_date < month_start or start_date > month_end):
                 conflicts.append({
                     'type': 'monthly',
                     'budget_id': budget.id,
                     'budget_name': f"Monthly Budget for {budget.year_month}",
-                    'period': f"{budget.year_month}",
+                    'period': budget.year_month,
                     'allocated_amount': category_budget.budget_amount
                 })
     
-    # Check project budgets for overlap  
+    # Check project budgets
     project_budgets = db.query(ProjectBudget).filter(
         and_(
             ProjectBudget.user_id == user_id,
-            ProjectBudget.is_active == True,
             ProjectBudget.id != exclude_budget_id if exclude_budget_id else True
         )
     ).all()
     
-    for project_budget in project_budgets:
-        # Check if this project budget has the category
+    for project in project_budgets:
         allocation = db.query(ProjectBudgetAllocation).filter(
             and_(
-                ProjectBudgetAllocation.project_budget_id == project_budget.id,
+                ProjectBudgetAllocation.project_budget_id == project.id,
                 ProjectBudgetAllocation.category_id == category_id
             )
         ).first()
         
         if allocation:
-            # Check for overlap with project dates
-            if not (end_date < project_budget.start_date or start_date > project_budget.end_date):
+            if not (end_date < project.start_date or start_date > project.end_date):
                 conflicts.append({
                     'type': 'project',
-                    'budget_id': project_budget.id,
-                    'budget_name': project_budget.name,
-                    'period': f"{project_budget.start_date.strftime('%Y-%m-%d')} to {project_budget.end_date.strftime('%Y-%m-%d')}",
+                    'budget_id': project.id,
+                    'budget_name': project.name,
+                    'period': f"{project.start_date.strftime('%Y-%m-%d')} to {project.end_date.strftime('%Y-%m-%d')}",
                     'allocated_amount': allocation.allocated_amount
                 })
     
     return conflicts
 
-def calculate_rollover_amounts(db: Session, user_id: str, current_year_month: str, category_id: str):
-    """
-    REQ-004: Calculate rollover amounts from previous month's budget
-    Returns: (rollover_amount, source_budget_info)
-    """
-    # Parse current month to get previous month
-    year, month = map(int, current_year_month.split('-'))
-    prev_month = month - 1
-    prev_year = year
-    if prev_month == 0:
-        prev_month = 12
-        prev_year = year - 1
-    
-    prev_year_month = f"{prev_year}-{prev_month:02d}"
-    
-    # Get previous month's budget for this category
-    prev_budget = db.query(Budget).filter(
+def validate_categories_owned_by_user(db: Session, user_id: str, category_ids: List[str]) -> bool:
+    """Validate that all categories belong to the user"""
+    categories = db.query(Category).filter(
         and_(
-            Budget.user_id == user_id,
-            Budget.year_month == prev_year_month,
-            Budget.is_active == True
-        )
-    ).first()
-    
-    if not prev_budget:
-        return 0.0, None
-    
-    # Get previous month's category budget
-    prev_category_budget = db.query(CategoryBudget).filter(
-        and_(
-            CategoryBudget.budget_id == prev_budget.id,
-            CategoryBudget.category_id == category_id
-        )
-    ).first()
-    
-    if not prev_category_budget:
-        return 0.0, None
-    
-    # Calculate actual spending for previous month
-    prev_year_obj, prev_month_obj = prev_year, prev_month
-    spent_amount = db.query(Transaction).filter(
-        and_(
-            Transaction.user_id == user_id,
-            Transaction.category_id == category_id,
-            Transaction.is_deleted == False,
-            extract('year', Transaction.occurred_on) == prev_year_obj,
-            extract('month', Transaction.occurred_on) == prev_month_obj,
-            Transaction.type.in_(['DEBIT', 'EXPENSE'])
+            Category.id.in_(category_ids),
+            Category.user_id == user_id,
+            Category.is_active == True
         )
     ).all()
-    
-    total_spent = sum(abs(t.amount) for t in spent_amount)
-    unused_amount = prev_category_budget.budget_amount - total_spent
-    
-    rollover_amount = 0.0
-    
-    # Apply rollover rules
-    if unused_amount > 0 and prev_category_budget.rollover_unused:
-        # Rollover unused funds
-        rollover_amount = unused_amount
-    elif unused_amount < 0 and prev_category_budget.rollover_overspend:
-        # Deduct overspend (negative rollover)
-        rollover_amount = unused_amount
-    
-    return rollover_amount, {
-        'prev_year_month': prev_year_month,
-        'budget_amount': prev_category_budget.budget_amount,
-        'spent_amount': total_spent,
-        'unused_amount': unused_amount,
-        'rollover_unused': prev_category_budget.rollover_unused,
-        'rollover_overspend': prev_category_budget.rollover_overspend
-    }
+    return len(categories) == len(category_ids)
+
+# ============================================================================
+# MONTHLY BUDGET ENDPOINTS
+# ============================================================================
 
 @router.post("/", response_model=BudgetResponse)
-def create_budget(
+def create_monthly_budget(
     budget: BudgetCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Create new monthly budget for any month/year with category-based spending limits"""
-    
-    logger.info(f"Creating budget for user {current_user.id} for period {budget.year_month}")
-    logger.debug(f"Budget data: {budget.dict()}")
-    
+    """Create a new monthly budget"""
     try:
-        # Validate input data
-        if not budget.year_month:
-            logger.error("Missing year_month in budget data")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="year_month is required and cannot be empty"
-            )
-        
-        if not budget.category_limits or len(budget.category_limits) == 0:
-            logger.error("No category limits provided in budget data")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="At least one category limit is required"
-            )
-        
-        # Validate year_month format
-        try:
-            year, month = map(int, budget.year_month.split('-'))
-            if year < 2000 or year > 3000 or month < 1 or month > 12:
-                raise ValueError("Invalid date range")
-        except (ValueError, AttributeError) as e:
-            logger.error(f"Invalid year_month format: {budget.year_month}, error: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid year_month format '{budget.year_month}'. Expected format: YYYY-MM (e.g., 2024-01)"
-            )
-        
-        # Check if budget already exists for this month
-        logger.debug(f"Checking for existing budget for {budget.year_month}")
-        existing_budget = db.query(Budget).filter(
-            and_(
-                Budget.user_id == current_user.id,
-                Budget.year_month == budget.year_month,
-                Budget.is_active == True
-            )
-        ).first()
-        
-        if existing_budget:
-            logger.warning(f"Budget already exists for user {current_user.id} in {budget.year_month}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error": "duplicate_budget",
-                    "message": f"Budget already exists for {budget.year_month}",
-                    "existing_budget_id": existing_budget.id,
-                    "year_month": budget.year_month
-                }
-            )
-        
-        # Validate categories exist and belong to user
-        logger.debug(f"Validating {len(budget.category_limits)} category limits")
+        # Validate categories
         category_ids = [limit.category_id for limit in budget.category_limits]
-        
-        # Check for duplicate categories
-        if len(category_ids) != len(set(category_ids)):
-            duplicate_ids = [cid for cid in set(category_ids) if category_ids.count(cid) > 1]
-            logger.error(f"Duplicate categories found: {duplicate_ids}")
+        if not validate_categories_owned_by_user(db, current_user.id, category_ids):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error": "duplicate_categories",
-                    "message": "Duplicate categories are not allowed in the same budget",
-                    "duplicate_category_ids": duplicate_ids
-                }
+                detail="One or more categories not found or not owned by user"
             )
         
-        # Validate budget amounts
-        for i, limit in enumerate(budget.category_limits):
-            if not limit.category_id:
-                logger.error(f"Empty category_id at index {i}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Category ID is required for limit at index {i}"
-                )
-            
-            if limit.budget_amount is None or limit.budget_amount < 0:
-                logger.error(f"Invalid budget amount {limit.budget_amount} for category {limit.category_id}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "error": "invalid_budget_amount",
-                        "message": f"Budget amount must be a positive number",
-                        "category_id": limit.category_id,
-                        "provided_amount": limit.budget_amount
-                    }
-                )
-        
-        # Check if categories exist and belong to user
-        categories = db.query(Category).filter(
-            and_(
-                Category.id.in_(category_ids),
-                Category.user_id == current_user.id,
-                Category.is_active == True
-            )
-        ).all()
-        
-        found_category_ids = {cat.id for cat in categories}
-        missing_category_ids = [cid for cid in category_ids if cid not in found_category_ids]
-        
-        if missing_category_ids:
-            logger.error(f"Categories not found or not owned by user: {missing_category_ids}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error": "invalid_categories",
-                    "message": "One or more categories not found or not owned by user",
-                    "missing_category_ids": missing_category_ids,
-                    "user_id": current_user.id
-                }
-            )
-        
-        # REQ-003: Check for budget overlap conflicts
-        year, month = map(int, budget.year_month.split('-'))
-        month_start = datetime(year, month, 1)
-        last_day = calendar.monthrange(year, month)[1]
-        month_end = datetime(year, month, last_day, 23, 59, 59)
+        # Check for conflicts
+        start_date, end_date = calculate_month_dates(budget.year_month)
+        category_names = get_category_names(db, category_ids)
         
         overlapping_categories = []
         for limit in budget.category_limits:
-            conflicts = check_budget_overlap(
-                db, current_user.id, limit.category_id, 
-                month_start, month_end
+            conflicts = check_budget_conflicts(
+                db, current_user.id, limit.category_id, start_date, end_date
             )
             if conflicts:
-                category_name = next((c.name for c in categories if c.id == limit.category_id), 'Unknown')
                 overlapping_categories.append({
                     'category_id': limit.category_id,
-                    'category_name': category_name,
+                    'category_name': category_names.get(limit.category_id, 'Unknown'),
                     'conflicts': conflicts
                 })
         
@@ -328,121 +438,81 @@ def create_budget(
             )
         
         # Create budget
-        logger.info(f"Creating budget record for {budget.year_month}")
         db_budget = Budget(
             user_id=current_user.id,
-            year_month=budget.year_month,
-            is_active=True
+            year_month=budget.year_month
         )
         db.add(db_budget)
         db.flush()
-        logger.debug(f"Created budget with ID: {db_budget.id}")
         
-        # Create category limits
-        logger.debug(f"Creating {len(budget.category_limits)} category limits")
-        for i, limit in enumerate(budget.category_limits):
-            # REQ-004: Calculate rollover amount from previous month
-            try:
-                rollover_amount, rollover_info = calculate_rollover_amounts(
-                    db, current_user.id, budget.year_month, limit.category_id
-                )
-                logger.debug(f"Rollover calculated for category {limit.category_id}: {rollover_amount}")
-            except Exception as e:
-                logger.warning(f"Could not calculate rollover for category {limit.category_id}: {e}")
-                rollover_amount = 0.0
+        # Create category limits with rollover
+        for limit in budget.category_limits:
+            rollover_amount, base_budget, prev_rollover, effective_budget, spent_amount = calculate_rollover_amount(
+                db, current_user.id, limit.category_id, budget.year_month
+            )
             
             category_budget = CategoryBudget(
                 budget_id=db_budget.id,
                 category_id=limit.category_id,
                 budget_amount=limit.budget_amount,
-                # REQ-004: Rollover Configuration
-                rollover_unused=getattr(limit, 'rollover_unused', False),
-                rollover_overspend=getattr(limit, 'rollover_overspend', False),
+                rollover_enabled=getattr(limit, 'rollover_enabled', False),
                 rollover_amount=rollover_amount
             )
             db.add(category_budget)
-            logger.debug(f"Added category limit {i+1}/{len(budget.category_limits)}: {limit.category_id} = ${limit.budget_amount}")
-    
+        
         db.commit()
         db.refresh(db_budget)
         
-        logger.info(f"Successfully created budget {db_budget.id} for user {current_user.id} in {budget.year_month}")
+        # Record rollover calculation history after successful budget creation
+        try:
+            for category_budget in db_budget.category_limits:
+                if category_budget.rollover_amount and category_budget.rollover_amount != 0.0:
+                    # Get previous month for history record
+                    year, month = map(int, budget.year_month.split('-'))
+                    if month == 1:
+                        prev_year, prev_month = year - 1, 12
+                    else:
+                        prev_year, prev_month = year, month - 1
+                    prev_year_month = f"{prev_year}-{prev_month:02d}"
+                    
+                    record_rollover_calculation(
+                        db, db_budget.id, category_budget.category_id, 
+                        category_budget.rollover_amount, prev_year_month,
+                        "budget_creation", base_budget, prev_rollover, effective_budget, spent_amount
+                    )
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to record rollover history during budget creation: {e}")
+        
         return db_budget
         
-    except HTTPException as e:
-        # Log HTTP exceptions but re-raise them as-is (these are validation errors)
-        logger.warning(f"Validation error creating budget for user {current_user.id}: {e.detail}")
+    except HTTPException:
         db.rollback()
         raise
     except Exception as e:
-        # Log unexpected errors with full traceback
-        error_msg = f"Unexpected error creating budget for user {current_user.id} in {budget.year_month if budget else 'unknown'}"
-        logger.error(f"{error_msg}: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        
-        # Rollback the transaction
-        try:
-            db.rollback()
-        except Exception as rollback_error:
-            logger.error(f"Error during rollback: {rollback_error}")
-        
-        # Return detailed error information
+        db.rollback()
+        logger.error(f"Error creating budget: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "internal_server_error",
-                "message": "An unexpected error occurred while creating the budget",
-                "error_type": type(e).__name__,
-                "error_details": str(e),
-                "user_id": current_user.id,
-                "timestamp": datetime.now().isoformat()
-            }
+            detail="Failed to create budget"
         )
 
-@router.get("/", response_model=List[BudgetResponse])
-def list_budgets(
+# ============================================================================
+# PROJECT BUDGET ENDPOINTS (Must come before /{year_month} route)
+# ============================================================================
+
+@router.get("/projects", response_model=List[ProjectBudgetResponse])
+def list_project_budgets(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List all user budgets"""
-    budgets = db.query(Budget).filter(
-        and_(
-            Budget.user_id == current_user.id,
-            Budget.is_active == True
-        )
-    ).order_by(Budget.year_month.desc()).offset(skip).limit(limit).all()
+    """List all project budgets"""
+    query = db.query(ProjectBudget).filter(ProjectBudget.user_id == current_user.id)
     
-    return budgets
-
-# Project Budget Endpoints - Must come before /{year_month} route to avoid conflicts
-
-@router.get("/projects-simple")
-def simple_test():
-    """Simple test endpoint without dependencies"""
-    return {"message": "Project budgets route is working", "status": "success"}
-
-@router.get("/projects-test")
-def test_project_budgets_table(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Test endpoint to check if project budget tables exist"""
-    try:
-        # Try to query the table
-        count = db.query(ProjectBudget).count()
-        return {
-            "status": "success", 
-            "message": f"Project budgets table exists with {count} records",
-            "user_id": current_user.id
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Project budgets table issue: {str(e)}",
-            "user_id": current_user.id
-        }
+    project_budgets = query.order_by(ProjectBudget.start_date.desc()).offset(skip).limit(limit).all()
+    return project_budgets
 
 @router.post("/projects", response_model=ProjectBudgetResponse)
 def create_project_budget(
@@ -450,60 +520,36 @@ def create_project_budget(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Create multi-month project budget with category allocations"""
-    logger.info(f"Creating project budget '{project_budget.name}' for user {current_user.id}")
-    logger.debug(f"Project budget data: {project_budget.dict()}")
-    
+    """Create a new project budget"""
     try:
-        # Input validation
+        # Validate input
         if not project_budget.name or not project_budget.name.strip():
-            logger.error("Project budget name is required")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Project budget name is required and cannot be empty"
+                detail="Project budget name is required"
             )
         
         if project_budget.total_amount <= 0:
-            logger.error(f"Invalid total amount: {project_budget.total_amount}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error": "invalid_total_amount",
-                    "message": "Total amount must be greater than zero",
-                    "provided_amount": project_budget.total_amount
-                }
+                detail="Total amount must be greater than zero"
             )
         
-        # Validate that end_date is after start_date
         if project_budget.end_date <= project_budget.start_date:
-            logger.error(f"Invalid date range: {project_budget.start_date} to {project_budget.end_date}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error": "invalid_date_range",
-                    "message": "End date must be after start date",
-                    "start_date": project_budget.start_date.isoformat(),
-                    "end_date": project_budget.end_date.isoformat()
-                }
+                detail="End date must be after start date"
             )
         
-        # Validate categories exist and belong to user
+        # Validate categories
         category_ids = [allocation.category_id for allocation in project_budget.category_allocations]
-        categories = db.query(Category).filter(
-            and_(
-                Category.id.in_(category_ids),
-                Category.user_id == current_user.id,
-                Category.is_active == True
-            )
-        ).all()
-        
-        if len(categories) != len(category_ids):
+        if not validate_categories_owned_by_user(db, current_user.id, category_ids):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="One or more categories not found or not owned by user"
             )
         
-        # Validate that total allocations don't exceed total budget
+        # Validate allocations don't exceed total
         total_allocated = sum(allocation.allocated_amount for allocation in project_budget.category_allocations)
         if total_allocated > project_budget.total_amount:
             raise HTTPException(
@@ -511,18 +557,19 @@ def create_project_budget(
                 detail=f"Total allocations ({total_allocated}) exceed total budget ({project_budget.total_amount})"
             )
         
-        # REQ-003: Check for budget overlap conflicts
+        # Check for conflicts
+        category_names = get_category_names(db, category_ids)
         overlapping_categories = []
+        
         for allocation in project_budget.category_allocations:
-            conflicts = check_budget_overlap(
+            conflicts = check_budget_conflicts(
                 db, current_user.id, allocation.category_id,
                 project_budget.start_date, project_budget.end_date
             )
             if conflicts:
-                category_name = next((c.name for c in categories if c.id == allocation.category_id), 'Unknown')
                 overlapping_categories.append({
                     'category_id': allocation.category_id,
-                    'category_name': category_name,
+                    'category_name': category_names.get(allocation.category_id, 'Unknown'),
                     'conflicts': conflicts
                 })
         
@@ -536,171 +583,40 @@ def create_project_budget(
             )
         
         # Create project budget
-        logger.info(f"Creating project budget record for '{project_budget.name}'")
         db_project_budget = ProjectBudget(
             user_id=current_user.id,
             name=project_budget.name,
             description=project_budget.description,
             start_date=project_budget.start_date,
             end_date=project_budget.end_date,
-            total_amount=project_budget.total_amount,
-            is_active=True
+            total_amount=project_budget.total_amount
         )
         db.add(db_project_budget)
         db.flush()
-        logger.debug(f"Created project budget with ID: {db_project_budget.id}")
         
-        # Create category allocations
-        logger.debug(f"Creating {len(project_budget.category_allocations)} category allocations")
-        for i, allocation in enumerate(project_budget.category_allocations):
+        # Create allocations
+        for allocation in project_budget.category_allocations:
             db_allocation = ProjectBudgetAllocation(
                 project_budget_id=db_project_budget.id,
                 category_id=allocation.category_id,
                 allocated_amount=allocation.allocated_amount
             )
             db.add(db_allocation)
-            logger.debug(f"Added allocation {i+1}/{len(project_budget.category_allocations)}: {allocation.category_id} = ${allocation.allocated_amount}")
         
         db.commit()
         db.refresh(db_project_budget)
-        
-        logger.info(f"Successfully created project budget '{project_budget.name}' with ID: {db_project_budget.id} for user {current_user.id}")
         return db_project_budget
         
-    except HTTPException as e:
-        # Log HTTP exceptions but re-raise them as-is (these are validation errors)
-        logger.warning(f"Validation error creating project budget '{project_budget.name}' for user {current_user.id}: {e.detail}")
+    except HTTPException:
         db.rollback()
         raise
     except Exception as e:
-        # Log unexpected errors with full traceback
-        error_msg = f"Unexpected error creating project budget '{project_budget.name}' for user {current_user.id}"
-        logger.error(f"{error_msg}: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        
-        # Rollback the transaction
-        try:
-            db.rollback()
-        except Exception as rollback_error:
-            logger.error(f"Error during rollback: {rollback_error}")
-        
-        # Return detailed error information
+        db.rollback()
+        logger.error(f"Error creating project budget: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "internal_server_error",
-                "message": "An unexpected error occurred while creating the project budget",
-                "error_type": type(e).__name__,
-                "error_details": str(e),
-                "project_name": project_budget.name,
-                "user_id": current_user.id,
-                "timestamp": datetime.now().isoformat()
-            }
+            detail="Failed to create project budget"
         )
-
-@router.get("/projects", response_model=List[ProjectBudgetResponse])
-def list_project_budgets(
-    skip: int = 0,
-    limit: int = 100,
-    active_only: bool = True,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """List all project budgets"""
-    logger.info(f"GET /budgets/projects - User: {current_user.id}, skip={skip}, limit={limit}, active_only={active_only}")
-    
-    try:
-        # Log authentication info
-        logger.debug(f"Authenticated user: {current_user.username} (ID: {current_user.id})")
-        
-        # Check if ProjectBudget table exists and is accessible
-        try:
-            total_count = db.query(ProjectBudget).count()
-            logger.debug(f"Total project budgets in database: {total_count}")
-        except Exception as table_error:
-            logger.error(f"Error accessing ProjectBudget table: {table_error}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "error": "database_table_error",
-                    "message": "Cannot access project_budgets table",
-                    "details": str(table_error)
-                }
-            )
-        
-        # Build query with logging
-        logger.debug("Building query for project budgets")
-        query = db.query(ProjectBudget).filter(ProjectBudget.user_id == current_user.id)
-        
-        if active_only:
-            logger.debug("Adding active_only filter")
-            query = query.filter(ProjectBudget.is_active == True)
-        
-        # Log the SQL query (for debugging)
-        try:
-            sql_query = str(query.statement.compile(compile_kwargs={"literal_binds": True}))
-            logger.debug(f"SQL Query: {sql_query}")
-        except Exception:
-            logger.debug("Could not compile SQL query for logging")
-        
-        # Execute query
-        logger.debug(f"Executing query with offset={skip}, limit={limit}")
-        project_budgets = query.order_by(ProjectBudget.start_date.desc()).offset(skip).limit(limit).all()
-        
-        logger.info(f"Found {len(project_budgets)} project budgets for user {current_user.id}")
-        
-        # Log details of found budgets
-        if project_budgets:
-            for i, pb in enumerate(project_budgets):
-                logger.debug(f"Project {i+1}: ID={pb.id}, Name='{pb.name}', Active={pb.is_active}, "
-                           f"Start={pb.start_date}, End={pb.end_date}")
-        else:
-            logger.debug("No project budgets found for this user")
-        
-        # Log response data
-        logger.debug(f"Returning {len(project_budgets)} project budgets")
-        return project_budgets
-        
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error in list_project_budgets: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "internal_server_error",
-                "message": "Error fetching project budgets",
-                "error_type": type(e).__name__,
-                "error_details": str(e),
-                "user_id": current_user.id
-            }
-        )
-
-@router.get("/projects/{project_budget_id}", response_model=ProjectBudgetResponse)
-def get_project_budget(
-    project_budget_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get specific project budget"""
-    project_budget = db.query(ProjectBudget).filter(
-        and_(
-            ProjectBudget.id == project_budget_id,
-            ProjectBudget.user_id == current_user.id
-        )
-    ).first()
-    
-    if not project_budget:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project budget not found"
-        )
-    
-    return project_budget
 
 @router.put("/projects/{project_budget_id}", response_model=ProjectBudgetResponse)
 def update_project_budget(
@@ -710,7 +626,6 @@ def update_project_budget(
     current_user: User = Depends(get_current_user)
 ):
     """Update project budget"""
-    # Get existing project budget
     project_budget = db.query(ProjectBudget).filter(
         and_(
             ProjectBudget.id == project_budget_id,
@@ -724,80 +639,67 @@ def update_project_budget(
             detail="Project budget not found"
         )
     
-    # Validate categories exist and belong to user
-    category_ids = [allocation.category_id for allocation in project_budget_update.category_allocations]
-    categories = db.query(Category).filter(
-        and_(
-            Category.id.in_(category_ids),
-            Category.user_id == current_user.id,
-            Category.is_active == True
-        )
-    ).all()
-    
-    if len(categories) != len(category_ids):
+    try:
+        # Validate categories if provided
+        if project_budget_update.category_allocations:
+            category_ids = [allocation.category_id for allocation in project_budget_update.category_allocations]
+            if not validate_categories_owned_by_user(db, current_user.id, category_ids):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="One or more categories not found or not owned by user"
+                )
+            
+            # Validate allocations don't exceed total
+            total_amount = project_budget_update.total_amount or project_budget.total_amount
+            total_allocated = sum(allocation.allocated_amount for allocation in project_budget_update.category_allocations)
+            if total_allocated > total_amount:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Total allocations ({total_allocated}) exceed total budget ({total_amount})"
+                )
+        
+        # Update fields
+        if project_budget_update.name:
+            project_budget.name = project_budget_update.name
+        if project_budget_update.description is not None:
+            project_budget.description = project_budget_update.description
+        if project_budget_update.start_date:
+            project_budget.start_date = project_budget_update.start_date
+        if project_budget_update.end_date:
+            project_budget.end_date = project_budget_update.end_date
+        if project_budget_update.total_amount:
+            project_budget.total_amount = project_budget_update.total_amount
+        
+        # Update allocations if provided
+        if project_budget_update.category_allocations:
+            # Delete existing allocations
+            db.query(ProjectBudgetAllocation).filter(
+                ProjectBudgetAllocation.project_budget_id == project_budget_id
+            ).delete()
+            
+            # Create new allocations
+            for allocation in project_budget_update.category_allocations:
+                db_allocation = ProjectBudgetAllocation(
+                    project_budget_id=project_budget.id,
+                    category_id=allocation.category_id,
+                    allocated_amount=allocation.allocated_amount
+                )
+                db.add(db_allocation)
+        
+        db.commit()
+        db.refresh(project_budget)
+        return project_budget
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating project budget: {e}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="One or more categories not found or not owned by user"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update project budget"
         )
-    
-    # Validate that total allocations don't exceed total budget
-    total_allocated = sum(allocation.allocated_amount for allocation in project_budget_update.category_allocations)
-    if total_allocated > project_budget_update.total_amount:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Total allocations ({total_allocated}) exceed total budget ({project_budget_update.total_amount})"
-        )
-    
-    # REQ-003: Check for budget overlap conflicts (exclude current budget)
-    overlapping_categories = []
-    for allocation in project_budget_update.category_allocations:
-        conflicts = check_budget_overlap(
-            db, current_user.id, allocation.category_id,
-            project_budget_update.start_date, project_budget_update.end_date,
-            exclude_budget_id=project_budget_id
-        )
-        if conflicts:
-            category_name = next((c.name for c in categories if c.id == allocation.category_id), 'Unknown')
-            overlapping_categories.append({
-                'category_id': allocation.category_id,
-                'category_name': category_name,
-                'conflicts': conflicts
-            })
-    
-    if overlapping_categories:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": "Category already budgeted for this period",
-                "overlapping_categories": overlapping_categories
-            }
-        )
-    
-    # Update project budget fields
-    project_budget.name = project_budget_update.name
-    project_budget.description = project_budget_update.description
-    project_budget.start_date = project_budget_update.start_date
-    project_budget.end_date = project_budget_update.end_date
-    project_budget.total_amount = project_budget_update.total_amount
-    
-    # Delete existing allocations and create new ones
-    db.query(ProjectBudgetAllocation).filter(
-        ProjectBudgetAllocation.project_budget_id == project_budget_id
-    ).delete()
-    
-    # Create new allocations
-    for allocation in project_budget_update.category_allocations:
-        db_allocation = ProjectBudgetAllocation(
-            project_budget_id=project_budget.id,
-            category_id=allocation.category_id,
-            allocated_amount=allocation.allocated_amount
-        )
-        db.add(db_allocation)
-    
-    db.commit()
-    db.refresh(project_budget)
-    
-    return project_budget
 
 @router.delete("/projects/{project_budget_id}")
 def delete_project_budget(
@@ -819,10 +721,8 @@ def delete_project_budget(
             detail="Project budget not found"
         )
     
-    # Soft delete by setting is_active to False
-    project_budget.is_active = False
+    db.delete(project_budget)
     db.commit()
-    
     return {"message": "Project budget deleted successfully"}
 
 @router.get("/projects/{project_budget_id}/progress", response_model=ProjectBudgetProgress)
@@ -845,44 +745,33 @@ def get_project_budget_progress(
             detail="Project budget not found"
         )
     
-    # Calculate spending for each category within the project date range
-    category_progress = []
-    total_spent = 0.0
-    
+    # Get allocations and calculate progress
     allocations = db.query(ProjectBudgetAllocation).filter(
         ProjectBudgetAllocation.project_budget_id == project_budget_id
     ).all()
     
+    category_names = get_category_names(db, [a.category_id for a in allocations])
+    category_progress = []
+    total_spent = 0.0
+    
     for allocation in allocations:
-        # Get category name
-        category = db.query(Category).filter(Category.id == allocation.category_id).first()
-        category_name = category.name if category else 'Unknown Category'
+        spent_amount = get_spending_for_category(
+            db, current_user.id, allocation.category_id,
+            project_budget.start_date, project_budget.end_date
+        )
         
-        # Get transactions for this category within the project date range
-        spent = db.query(Transaction).filter(
-            and_(
-                Transaction.user_id == current_user.id,
-                Transaction.category_id == allocation.category_id,
-                Transaction.occurred_on >= project_budget.start_date,
-                Transaction.occurred_on <= project_budget.end_date,
-                Transaction.amount < 0  # Only expenses
-            )
-        ).with_entities(Transaction.amount).all()
-        
-        category_spent = abs(sum(row[0] for row in spent)) if spent else 0.0
-        total_spent += category_spent
+        total_spent += spent_amount
         
         category_progress.append({
             'category_id': allocation.category_id,
-            'category_name': category_name,
+            'category_name': category_names.get(allocation.category_id, 'Unknown Category'),
             'allocated_amount': allocation.allocated_amount,
-            'spent_amount': category_spent,
-            'remaining': allocation.allocated_amount - category_spent,
-            'percentage_used': (category_spent / allocation.allocated_amount * 100) if allocation.allocated_amount > 0 else 0
+            'spent_amount': spent_amount,
+            'remaining': allocation.allocated_amount - spent_amount,
+            'percentage_used': (spent_amount / allocation.allocated_amount * 100) if allocation.allocated_amount > 0 else 0
         })
     
     # Calculate days remaining
-    from datetime import datetime
     current_date = datetime.now()
     days_remaining = max(0, (project_budget.end_date - current_date).days)
     
@@ -897,50 +786,93 @@ def get_project_budget_progress(
         'remaining_amount': project_budget.total_amount - total_spent,
         'progress_percentage': (total_spent / project_budget.total_amount * 100) if project_budget.total_amount > 0 else 0,
         'days_remaining': days_remaining,
-        'category_progress': category_progress,
-        'is_active': project_budget.is_active
+        'category_progress': category_progress
     }
 
+# ============================================================================
+# MONTHLY BUDGET ENDPOINTS
+# ============================================================================
+
+@router.get("/debug/all")
+def debug_all_budgets(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Debug: List all budgets with details"""
+    budgets = db.query(Budget).filter(Budget.user_id == current_user.id).all()
+    result = []
+    for budget in budgets:
+        result.append({
+            "id": budget.id,
+            "year_month": budget.year_month,
+            "created_at": budget.created_at.isoformat(),
+            "category_count": len(budget.category_limits)
+        })
+    return result
+
+@router.get("/", response_model=List[BudgetResponse])
+def list_monthly_budgets(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List all monthly budgets"""
+    budgets = db.query(Budget).filter(
+        Budget.user_id == current_user.id
+    ).order_by(Budget.year_month.desc()).offset(skip).limit(limit).all()
+    
+    logger.info(f"Found {len(budgets)} budgets for user {current_user.id}")
+    for budget in budgets:
+        logger.info(f"Budget: id={budget.id}, year_month={budget.year_month}")
+    
+    return budgets
+
 @router.get("/{year_month}", response_model=BudgetResponse)
-def get_budget_by_month(
+def get_monthly_budget(
     year_month: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get budget by specific year-month"""
+    """Get monthly budget by year-month"""
+    logger.info(f"Fetching budget for user {current_user.id}, month {year_month}")
+    
     budget = db.query(Budget).filter(
         and_(
             Budget.user_id == current_user.id,
-            Budget.year_month == year_month,
-            Budget.is_active == True
+            Budget.year_month == year_month
         )
     ).first()
     
     if not budget:
+        logger.info(f"No budget found for {year_month}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Budget not found for {year_month}"
         )
     
+    logger.info(f"Found budget: id={budget.id}, year_month={budget.year_month}, categories={len(budget.category_limits)}")
     return budget
 
 @router.put("/{budget_id}", response_model=BudgetResponse)
-def update_budget(
+def update_monthly_budget(
     budget_id: str,
     budget_update: BudgetUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Update existing monthly budget allocations"""
+    """Update monthly budget"""
+    logger.info(f"Updating budget: id={budget_id}, user={current_user.id}")
     
-    # Get existing budget
     budget = db.query(Budget).filter(
         and_(
             Budget.id == budget_id,
-            Budget.user_id == current_user.id,
-            Budget.is_active == True
+            Budget.user_id == current_user.id
         )
     ).first()
+    
+    if budget:
+        logger.info(f"Budget to update: id={budget.id}, year_month={budget.year_month}")
     
     if not budget:
         raise HTTPException(
@@ -948,85 +880,99 @@ def update_budget(
             detail="Budget not found"
         )
     
-    # Validate categories exist and belong to user
-    category_ids = [limit.category_id for limit in budget_update.category_limits]
-    categories = db.query(Category).filter(
-        and_(
-            Category.id.in_(category_ids),
-            Category.user_id == current_user.id,
-            Category.is_active == True
-        )
-    ).all()
-    
-    if len(categories) != len(category_ids):
+    try:
+        # Validate categories
+        category_ids = [limit.category_id for limit in budget_update.category_limits]
+        if not validate_categories_owned_by_user(db, current_user.id, category_ids):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="One or more categories not found or not owned by user"
+            )
+        
+        # Check for conflicts (excluding current budget)
+        start_date, end_date = calculate_month_dates(budget.year_month)
+        category_names = get_category_names(db, category_ids)
+        
+        overlapping_categories = []
+        for limit in budget_update.category_limits:
+            conflicts = check_budget_conflicts(
+                db, current_user.id, limit.category_id, start_date, end_date, budget_id
+            )
+            if conflicts:
+                overlapping_categories.append({
+                    'category_id': limit.category_id,
+                    'category_name': category_names.get(limit.category_id, 'Unknown'),
+                    'conflicts': conflicts
+                })
+        
+        if overlapping_categories:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Category already budgeted for this period",
+                    "overlapping_categories": overlapping_categories
+                }
+            )
+        
+        # Delete existing category limits
+        db.query(CategoryBudget).filter(CategoryBudget.budget_id == budget_id).delete()
+        
+        # Create new category limits
+        for limit in budget_update.category_limits:
+            rollover_amount = calculate_rollover_amount(
+                db, current_user.id, limit.category_id, budget.year_month
+            )
+            
+            category_budget = CategoryBudget(
+                budget_id=budget.id,
+                category_id=limit.category_id,
+                budget_amount=limit.budget_amount,
+                rollover_enabled=getattr(limit, 'rollover_enabled', False),
+                rollover_amount=rollover_amount
+            )
+            db.add(category_budget)
+        
+        db.commit()
+        db.refresh(budget)
+        logger.info(f"Budget updated successfully: id={budget.id}, year_month={budget.year_month}")
+        # Invalidate rollover for all future months after this budget
+        invalidate_rollover_chain(db, current_user.id, budget.year_month, reason="budget_update")
+        db.commit()
+        # Broadcast WebSocket update for each affected month (including this one and future months)
+        try:
+            # Find all affected months (this and future months)
+            affected_budgets = db.query(Budget).filter(
+                Budget.user_id == current_user.id,
+                Budget.year_month >= budget.year_month
+            ).all()
+            for b in affected_budgets:
+                asyncio.create_task(broadcast_rollover_update({"month": b.year_month}))
+        except Exception as e:
+            logger.warning(f"Failed to broadcast rollover update: {e}")
+        return budget
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating budget: {e}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="One or more categories not found or not owned by user"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update budget"
         )
-    
-    # REQ-003: Check for budget overlap conflicts (exclude current budget)
-    year, month = map(int, budget.year_month.split('-'))
-    month_start = datetime(year, month, 1)
-    last_day = calendar.monthrange(year, month)[1]
-    month_end = datetime(year, month, last_day, 23, 59, 59)
-    
-    overlapping_categories = []
-    for limit in budget_update.category_limits:
-        conflicts = check_budget_overlap(
-            db, current_user.id, limit.category_id, 
-            month_start, month_end, exclude_budget_id=budget_id
-        )
-        if conflicts:
-            category_name = next((c.name for c in categories if c.id == limit.category_id), 'Unknown')
-            overlapping_categories.append({
-                'category_id': limit.category_id,
-                'category_name': category_name,
-                'conflicts': conflicts
-            })
-    
-    if overlapping_categories:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": "Category already budgeted for this period",
-                "overlapping_categories": overlapping_categories
-            }
-        )
-    
-    # Delete existing category limits
-    db.query(CategoryBudget).filter(CategoryBudget.budget_id == budget_id).delete()
-    
-    # Create new category limits
-    for limit in budget_update.category_limits:
-        category_budget = CategoryBudget(
-            budget_id=budget_id,
-            category_id=limit.category_id,
-            budget_amount=limit.budget_amount,
-            # REQ-004: Rollover Configuration
-            rollover_unused=getattr(limit, 'rollover_unused', False),
-            rollover_overspend=getattr(limit, 'rollover_overspend', False),
-            rollover_amount=0.0  # Will be calculated during rollover
-        )
-        db.add(category_budget)
-    
-    db.commit()
-    db.refresh(budget)
-    
-    return budget
 
 @router.delete("/{budget_id}")
-def delete_budget(
+def delete_monthly_budget(
     budget_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Delete monthly budget"""
-    
+    """Delete (deactivate) monthly budget"""
     budget = db.query(Budget).filter(
         and_(
             Budget.id == budget_id,
-            Budget.user_id == current_user.id,
-            Budget.is_active == True
+            Budget.user_id == current_user.id
         )
     ).first()
     
@@ -1036,41 +982,21 @@ def delete_budget(
             detail="Budget not found"
         )
     
-    # Soft delete
-    budget.is_active = False
+    db.delete(budget)
     db.commit()
-    
-    return {"detail": "Budget deleted successfully"}
+    return {"message": "Budget deleted successfully"}
 
 @router.post("/copy", response_model=BudgetResponse)
-def copy_budget(
+def copy_monthly_budget(
     copy_request: BudgetCopyRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Copy budget from previous month"""
-    
-    # Check if target budget already exists
-    target_budget = db.query(Budget).filter(
-        and_(
-            Budget.user_id == current_user.id,
-            Budget.year_month == copy_request.target_year_month,
-            Budget.is_active == True
-        )
-    ).first()
-    
-    if target_budget:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Budget already exists for {copy_request.target_year_month}"
-        )
-    
-    # Get source budget
+    """Copy budget from one month to another"""
     source_budget = db.query(Budget).filter(
         and_(
             Budget.user_id == current_user.id,
-            Budget.year_month == copy_request.source_year_month,
-            Budget.is_active == True
+            Budget.year_month == copy_request.source_year_month
         )
     ).first()
     
@@ -1083,40 +1009,63 @@ def copy_budget(
     # Create new budget
     new_budget = Budget(
         user_id=current_user.id,
-        year_month=copy_request.target_year_month,
-        is_active=True
+        year_month=copy_request.target_year_month
     )
     db.add(new_budget)
     db.flush()
     
     # Copy category limits
     for category_limit in source_budget.category_limits:
+        rollover_amount, base_budget, prev_rollover, effective_budget, spent_amount = calculate_rollover_amount(
+            db, current_user.id, category_limit.category_id, copy_request.target_year_month
+        )
+        
         new_category_limit = CategoryBudget(
             budget_id=new_budget.id,
             category_id=category_limit.category_id,
-            budget_amount=category_limit.budget_amount
+            budget_amount=category_limit.budget_amount,
+            rollover_enabled=category_limit.rollover_enabled,
+            rollover_amount=rollover_amount
         )
         db.add(new_category_limit)
     
     db.commit()
     db.refresh(new_budget)
     
+    # Record rollover calculation history after successful budget copy
+    try:
+        for category_budget in new_budget.category_limits:
+            if category_budget.rollover_amount and category_budget.rollover_amount != 0.0:
+                # Get previous month for history record
+                year, month = map(int, copy_request.target_year_month.split('-'))
+                if month == 1:
+                    prev_year, prev_month = year - 1, 12
+                else:
+                    prev_year, prev_month = year, month - 1
+                prev_year_month = f"{prev_year}-{prev_month:02d}"
+                
+                record_rollover_calculation(
+                    db, new_budget.id, category_budget.category_id, 
+                    category_budget.rollover_amount, prev_year_month,
+                    "budget_copy", None, None, None, None
+                )
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to record rollover history during budget copy: {e}")
+    
     return new_budget
 
-@router.get("/{year_month}/spending", response_model=dict)
-def get_budget_spending(
+@router.get("/{year_month}/spending")
+def get_monthly_spending(
     year_month: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get current spending against budget limits for a specific month"""
-    
-    # Get budget
+    """Get spending data for a monthly budget"""
     budget = db.query(Budget).filter(
         and_(
             Budget.user_id == current_user.id,
-            Budget.year_month == year_month,
-            Budget.is_active == True
+            Budget.year_month == year_month
         )
     ).first()
     
@@ -1126,54 +1075,32 @@ def get_budget_spending(
             detail=f"Budget not found for {year_month}"
         )
     
-    # Parse year and month
-    try:
-        year, month = map(int, year_month.split('-'))
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid year_month format. Use YYYY-MM"
-        )
+    start_date, end_date = calculate_month_dates(year_month)
+    category_names = get_category_names(db, [cl.category_id for cl in budget.category_limits])
     
-    # Calculate spending per category for the month
     spending_data = {}
     total_budgeted = 0
     total_spent = 0
     
     for category_limit in budget.category_limits:
-        # Get actual spending for this category in this month
-        spent = db.query(Transaction).filter(
-            and_(
-                Transaction.user_id == current_user.id,
-                Transaction.category_id == category_limit.category_id,
-                Transaction.is_deleted == False,
-                extract('year', Transaction.occurred_on) == year,
-                extract('month', Transaction.occurred_on) == month,
-                Transaction.type.in_(['DEBIT', 'EXPENSE'])  # Only count expenses
-            )
-        ).all()
+        spent_amount = get_spending_for_category(
+            db, current_user.id, category_limit.category_id, start_date, end_date
+        )
         
-        spent_amount = sum(abs(t.amount) for t in spent)
-        budget_amount = category_limit.budget_amount
-        # REQ-004: Include rollover amount in effective budget
-        effective_budget = budget_amount + category_limit.rollover_amount
+        effective_budget = category_limit.budget_amount + category_limit.rollover_amount
         remaining = effective_budget - spent_amount
-        
-        # Get category name
-        category = db.query(Category).filter(Category.id == category_limit.category_id).first()
+        progress_percentage = (spent_amount / effective_budget * 100) if effective_budget > 0 else 0
         
         spending_data[category_limit.category_id] = {
-            'category_name': category.name if category else 'Unknown',
-            'budget_amount': budget_amount,
-            'spent_amount': spent_amount,
-            'remaining_amount': remaining,
-            'percentage_used': (spent_amount / effective_budget * 100) if effective_budget > 0 else 0,
-            'status': 'over' if spent_amount > effective_budget else 'warning' if spent_amount > effective_budget * 0.75 else 'good',
-            # REQ-004: Rollover information
+            'category_id': category_limit.category_id,
+            'category_name': category_names.get(category_limit.category_id, 'Unknown'),
+            'budget_amount': category_limit.budget_amount,
             'rollover_amount': category_limit.rollover_amount,
             'effective_budget': effective_budget,
-            'rollover_unused': category_limit.rollover_unused,
-            'rollover_overspend': category_limit.rollover_overspend
+            'spent_amount': spent_amount,
+            'remaining_amount': remaining,
+            'progress_percentage': progress_percentage,
+            'is_over_budget': spent_amount > effective_budget
         }
         
         total_budgeted += effective_budget
@@ -1186,3 +1113,4 @@ def get_budget_spending(
         'total_remaining': total_budgeted - total_spent,
         'categories': spending_data
     }
+

@@ -3,11 +3,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import extract
 from typing import List, Union
 from datetime import datetime
+import logging
 
 from app.database import get_db
 from app import models, schemas, auth
 from app.routers.recurring_transactions import calculate_next_due_date_enhanced
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
@@ -48,6 +50,11 @@ def handle_recurrence_creation(transaction: models.Transaction, recurrence_data:
         
         db.add(recurring_transaction)
         db.flush()  # Get the ID without committing
+        # Link the original transaction to the new recurring transaction
+        transaction.recurring_transaction_id = recurring_transaction.id
+        db.commit()
+        db.refresh(recurring_transaction)
+        db.refresh(transaction)
         return recurring_transaction
         
     except ValueError as e:
@@ -111,9 +118,9 @@ def convert_recurring_to_recurrence_data(recurring_transaction: models.Recurring
         
     return schemas.RecurrenceData(
         id=recurring_transaction.id,
-        frequency=recurring_transaction.frequency.value,
+        frequency=recurring_transaction.frequency,
         start_date=recurring_transaction.start_date,
-        date_flexibility=recurring_transaction.date_flexibility.value,
+        date_flexibility=recurring_transaction.date_flexibility,
         range_start=recurring_transaction.range_start,
         range_end=recurring_transaction.range_end,
         preference=recurring_transaction.preference,
@@ -154,6 +161,22 @@ def create_transactions(
     # Refresh created transactions
     for transaction in created_transactions:
         db.refresh(transaction)
+    
+    # Invalidate rollover calculations for affected months
+    try:
+        from .budgets import invalidate_rollover_chain
+        affected_months = set()
+        
+        for transaction in created_transactions:
+            transaction_month = transaction.date.strftime('%Y-%m')
+            affected_months.add(transaction_month)
+        
+        for month in affected_months:
+            invalidate_rollover_chain(db, current_user.id, month, "transaction_created")
+        
+        db.commit()  # Commit rollover invalidation
+    except Exception as e:
+        logger.warning(f"Failed to invalidate rollover after transaction creation: {e}")
     
     # Return single transaction if input was single, otherwise return list
     if len(created_transactions) == 1:
@@ -278,6 +301,22 @@ def update_transactions(
             "recurrence": convert_recurring_to_recurrence_data(transaction.recurring_transaction) if transaction.recurring_transaction else None
         }
         response_transactions.append(schemas.Transaction(**transaction_dict))
+    
+    # Invalidate rollover calculations for affected months
+    try:
+        from .budgets import invalidate_rollover_chain
+        affected_months = set()
+        
+        for transaction in updated_transactions:
+            transaction_month = transaction.date.strftime('%Y-%m')
+            affected_months.add(transaction_month)
+        
+        for month in affected_months:
+            invalidate_rollover_chain(db, current_user.id, month, "transaction_updated")
+        
+        db.commit()  # Commit rollover invalidation
+    except Exception as e:
+        logger.warning(f"Failed to invalidate rollover after transaction update: {e}")
     
     # Return single transaction if input was single, otherwise return list
     if len(response_transactions) == 1:

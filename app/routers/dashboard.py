@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func, extract
 from datetime import date
+import logging
 
 from app.database import get_db
 from app import models, schemas, auth
@@ -15,6 +16,7 @@ def get_dashboard(
     current_user: models.User = Depends(auth.get_current_user),
     db: Session = Depends(get_db)
 ):
+    logger = logging.getLogger("dashboard-debug")
     # Default to current month if not specified
     if not year_month:
         today = date.today()
@@ -22,6 +24,7 @@ def get_dashboard(
     
     year, month = map(int, year_month.split('-'))
     
+    logger.info(f"Dashboard request for user_id={current_user.id}, year_month={year_month}")
     # Get all transactions for specified month
     all_transactions = db.query(models.Transaction).filter(
         models.Transaction.user_id == current_user.id,
@@ -29,6 +32,9 @@ def get_dashboard(
         extract('year', models.Transaction.occurred_on) == year,
         extract('month', models.Transaction.occurred_on) == month
     ).all()
+    logger.info(f"Found {len(all_transactions)} transactions for user {current_user.id} in {year_month}")
+    if all_transactions:
+        logger.info(f"Sample transaction: {all_transactions[0].__dict__}")
     
     # Separate transactions by category-based logic
     # Income: transactions in income categories OR positive CREDIT transactions that look like income
@@ -55,8 +61,7 @@ def get_dashboard(
     # Get budget data for this period
     budget = db.query(models.Budget).filter(
         models.Budget.user_id == current_user.id,
-        models.Budget.year_month == year_month,
-        models.Budget.is_active == True
+        models.Budget.year_month == year_month
     ).first()
     
     budgets = []

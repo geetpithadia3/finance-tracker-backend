@@ -1,14 +1,19 @@
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import os
 import logging
 import time
+from typing import Set
+import asyncio
 
 from app.config import settings
 from app.database import create_tables
 from app.routers import auth, categories, transactions, budgets, dashboard, expenses, allocation, health, budget_alerts
+from app.routers import rollover_config
+from app.routers import recurring_transactions
+from app.websockets import router as websocket_router
 
 # Configure logging
 logging.basicConfig(
@@ -93,6 +98,9 @@ app.include_router(expenses.router)
 app.include_router(allocation.router)
 app.include_router(health.router)
 app.include_router(budget_alerts.router)
+app.include_router(rollover_config.router)
+app.include_router(recurring_transactions.router)
+app.include_router(websocket_router)
 
 # Log available routes for debugging
 logger.info("Available routes:")
@@ -137,6 +145,33 @@ def show_tutorial():
         </body>
         </html>
         """)
+
+
+# --- WebSocket for real-time rollover updates ---
+
+connected_rollover_clients: Set[WebSocket] = set()
+
+@app.websocket("/api/rollover-updates")
+async def rollover_updates_ws(websocket: WebSocket):
+    await websocket.accept()
+    connected_rollover_clients.add(websocket)
+    try:
+        while True:
+            # Keep the connection alive (ping/pong or sleep)
+            await asyncio.sleep(30)
+    except WebSocketDisconnect:
+        connected_rollover_clients.remove(websocket)
+
+async def broadcast_rollover_update(message: dict):
+    """Broadcast a rollover update to all connected clients."""
+    disconnected = set()
+    for ws in connected_rollover_clients:
+        try:
+            await ws.send_json(message)
+        except Exception:
+            disconnected.add(ws)
+    for ws in disconnected:
+        connected_rollover_clients.remove(ws)
 
 
 if __name__ == "__main__":

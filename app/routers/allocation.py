@@ -13,52 +13,66 @@ router = APIRouter(prefix="/allocation", tags=["allocation"])
 
 
 def calculate_paycheck_dates_for_month(income_recurring: models.RecurringTransaction, year: int, month: int) -> List[datetime]:
-    """Calculate all paycheck dates for a given month based on recurring income pattern"""
+    """Calculate all paycheck dates for a given month based on recurring income pattern, preserving cadence across months."""
     paycheck_dates = []
+    freq = income_recurring.frequency.value if hasattr(income_recurring.frequency, 'value') else income_recurring.frequency
+    start_date = income_recurring.start_date
     
-    # Start from the beginning of the month
-    month_start = datetime(year, month, 1)
-    
-    # Calculate the next month for boundary checking
-    if month == 12:
-        month_end = datetime(year + 1, 1, 1) - timedelta(days=1)
+    # Determine the interval for the frequency
+    if freq == "DAILY":
+        delta = timedelta(days=1)
+    elif freq == "WEEKLY":
+        delta = timedelta(weeks=1)
+    elif freq == "BIWEEKLY":
+        delta = timedelta(weeks=2)
+    elif freq == "FOUR_WEEKLY":
+        delta = timedelta(weeks=4)
+    elif freq == "MONTHLY":
+        delta = None  # handled separately
+    elif freq == "YEARLY":
+        delta = None  # handled separately
     else:
-        month_end = datetime(year, month + 1, 1) - timedelta(days=1)
+        delta = None
     
-    # Start from the recurring transaction's start date or month start, whichever is later
-    current_date = max(income_recurring.start_date, month_start)
-    
-    # If the start date is after this month, no paychecks this month
-    if current_date > month_end:
-        return []
-    
-    # Generate paycheck dates based on frequency
-    while current_date <= month_end:
-        # Check if this date falls within the target month
-        if current_date.year == year and current_date.month == month:
-            paycheck_dates.append(current_date)
-        
-        # Calculate next occurrence based on frequency
-        if income_recurring.frequency == models.RecurrenceFrequency.DAILY:
-            current_date += timedelta(days=1)
-        elif income_recurring.frequency == models.RecurrenceFrequency.WEEKLY:
-            current_date += timedelta(weeks=1)
-        elif income_recurring.frequency == models.RecurrenceFrequency.BIWEEKLY:
-            current_date += timedelta(weeks=2)
-        elif income_recurring.frequency == models.RecurrenceFrequency.FOUR_WEEKLY:
-            current_date += timedelta(weeks=4)
-        elif income_recurring.frequency == models.RecurrenceFrequency.MONTHLY:
-            current_date += relativedelta(months=1)
-        elif income_recurring.frequency == models.RecurrenceFrequency.YEARLY:
-            current_date += relativedelta(years=1)
-        else:
-            # Default to monthly to avoid infinite loop
-            current_date += relativedelta(months=1)
-        
-        # Safety check to avoid infinite loops
-        if current_date.year > year + 1:
-            break
-    
+    # Calculate the range for the target month
+    month_start = datetime(year, month, 1)
+    if month == 12:
+        month_end = datetime(year + 1, 1, 1) - timedelta(seconds=1)
+    else:
+        month_end = datetime(year, month + 1, 1) - timedelta(seconds=1)
+
+    # For daily/weekly/biweekly/four-weekly, preserve cadence from start_date
+    if delta is not None:
+        # Find the first occurrence on or before month_start
+        current = start_date
+        while current < month_start:
+            current += delta
+        # If we overshot, step back one interval
+        if current > month_start:
+            current -= delta
+        # Now, iterate forward and collect all paychecks in the month
+        while current <= month_end:
+            if current >= month_start:
+                paycheck_dates.append(current)
+            current += delta
+    elif freq == "MONTHLY":
+        # For monthly, step forward by months from start_date
+        current = start_date
+        while current < month_start:
+            current += relativedelta(months=1)
+        while current <= month_end:
+            if current >= month_start:
+                paycheck_dates.append(current)
+            current += relativedelta(months=1)
+    elif freq == "YEARLY":
+        # For yearly, step forward by years from start_date
+        current = start_date
+        while current < month_start:
+            current += relativedelta(years=1)
+        while current <= month_end:
+            if current >= month_start:
+                paycheck_dates.append(current)
+            current += relativedelta(years=1)
     return paycheck_dates
 
 
@@ -228,69 +242,135 @@ def get_allocation(
     
     if not recurring_income:
         print("DEBUG: No recurring income found, returning empty paychecks")
-        return schemas.AllocationResponse(paychecks=[])
+        return schemas.AllocationResponse(
+            paychecks=[],
+            month=year_month,
+            income=0.0,
+            total_expenses=0.0,
+            savings=0.0
+        )
     
     paychecks = []
-    
+
     # For each recurring income source, calculate paycheck schedule for the month
     for income_recurring in recurring_income:
         paycheck_dates = calculate_paycheck_dates_for_month(income_recurring, year, month)
-        
         print(f"DEBUG: Income '{income_recurring.description}' has {len(paycheck_dates)} paychecks in {year_month}")
-        
+        if not paycheck_dates:
+            continue
+        # Build the full rolling range: from first paycheck to the last next-paycheck date
+        periods = []
         for i, paycheck_date in enumerate(paycheck_dates):
-            # Calculate next paycheck date (for determining bill coverage period)
             if i + 1 < len(paycheck_dates):
                 next_paycheck_date = paycheck_dates[i + 1]
             else:
-                # Next paycheck is in the following period
-                next_month_dates = calculate_paycheck_dates_for_month(
-                    income_recurring, 
-                    year if month < 12 else year + 1,
-                    month + 1 if month < 12 else 1
-                )
-                next_paycheck_date = next_month_dates[0] if next_month_dates else None
-            
-            # Find all expenses due between this paycheck and the next
+                # Find the next paycheck date after the last one
+                freq = income_recurring.frequency.value if hasattr(income_recurring.frequency, 'value') else income_recurring.frequency
+                current = paycheck_date
+                if freq == "DAILY":
+                    next_paycheck_date = current + timedelta(days=1)
+                elif freq == "WEEKLY":
+                    next_paycheck_date = current + timedelta(weeks=1)
+                elif freq == "BIWEEKLY":
+                    next_paycheck_date = current + timedelta(weeks=2)
+                elif freq == "FOUR_WEEKLY":
+                    next_paycheck_date = current + timedelta(weeks=4)
+                elif freq == "MONTHLY":
+                    next_paycheck_date = current + relativedelta(months=1)
+                elif freq == "YEARLY":
+                    next_paycheck_date = current + relativedelta(years=1)
+                else:
+                    next_paycheck_date = None
+            periods.append((paycheck_date, next_paycheck_date))
+        # Determine the full range for expense occurrences
+        full_range_start = periods[0][0]
+        full_range_end = periods[-1][1]
+        # Generate all expense occurrences for the full range
+        def generate_expense_occurrences_rolling(expense_recurring, range_start, range_end):
+            freq = expense_recurring.frequency.value if hasattr(expense_recurring.frequency, 'value') else expense_recurring.frequency
+            occurrences = []
+            current = expense_recurring.start_date
+            # Find the first occurrence on or after range_start
+            while current < range_start:
+                if freq == "DAILY":
+                    current += timedelta(days=1)
+                elif freq == "WEEKLY":
+                    current += timedelta(weeks=1)
+                elif freq == "BIWEEKLY":
+                    current += timedelta(weeks=2)
+                elif freq == "FOUR_WEEKLY":
+                    current += timedelta(weeks=4)
+                elif freq == "MONTHLY":
+                    current += relativedelta(months=1)
+                elif freq == "YEARLY":
+                    current += relativedelta(years=1)
+                else:
+                    break
+            # Now, collect all occurrences in the range
+            while current < range_end:
+                if current >= range_start:
+                    occurrences.append(current)
+                if freq == "DAILY":
+                    current += timedelta(days=1)
+                elif freq == "WEEKLY":
+                    current += timedelta(weeks=1)
+                elif freq == "BIWEEKLY":
+                    current += timedelta(weeks=2)
+                elif freq == "FOUR_WEEKLY":
+                    current += timedelta(weeks=4)
+                elif freq == "MONTHLY":
+                    current += relativedelta(months=1)
+                elif freq == "YEARLY":
+                    current += relativedelta(years=1)
+                else:
+                    break
+            return occurrences
+        # Precompute all expense occurrences for each recurring expense for the full rolling range
+        expense_occurrences = {}
+        for expense_recurring in recurring_expenses:
+            expense_occurrences[expense_recurring.id] = generate_expense_occurrences_rolling(
+                expense_recurring, full_range_start, full_range_end)
+        # Now, for each paycheck period, allocate expenses
+        for (paycheck_date, next_paycheck_date) in periods:
             expenses_in_period = []
             total_allocation = 0.0
-            
             for expense_recurring in recurring_expenses:
-                expense_dates = calculate_expense_dates_between_paychecks(
-                    expense_recurring, paycheck_date, next_paycheck_date
-                )
-                
-                for expense_date in expense_dates:
-                    upcoming_expense = schemas.UpcomingExpense(
-                        id=f"{expense_recurring.id}-{expense_date.isoformat()}",
-                        description=expense_recurring.description,
-                        amount=abs(expense_recurring.amount),  # Make sure it's positive for display
-                        due_date=expense_date,
-                        category=expense_recurring.category.name if expense_recurring.category else "General",
-                        is_recurring=True,
-                        variability_factor=0.1 if expense_recurring.is_variable_amount else 0.0,
-                        is_variable_amount=expense_recurring.is_variable_amount,
-                        estimated_min_amount=expense_recurring.estimated_min_amount,
-                        estimated_max_amount=expense_recurring.estimated_max_amount
-                    )
-                    expenses_in_period.append(upcoming_expense)
-                    total_allocation += abs(expense_recurring.amount)
-            
-            # Create paycheck allocation
+                for expense_date in expense_occurrences[expense_recurring.id]:
+                    if paycheck_date <= expense_date < next_paycheck_date:
+                        upcoming_expense = schemas.UpcomingExpense(
+                            id=f"{expense_recurring.id}-{expense_date.isoformat()}",
+                            description=expense_recurring.description,
+                            amount=abs(expense_recurring.amount),
+                            due_date=expense_date,
+                            category=expense_recurring.category.name if expense_recurring.category else "General",
+                            is_recurring=True,
+                            variability_factor=0.1 if expense_recurring.is_variable_amount else 0.0,
+                            is_variable_amount=expense_recurring.is_variable_amount,
+                            estimated_min_amount=expense_recurring.estimated_min_amount,
+                            estimated_max_amount=expense_recurring.estimated_max_amount
+                        )
+                        expenses_in_period.append(upcoming_expense)
+                        total_allocation += abs(expense_recurring.amount)
+            freq_value = income_recurring.frequency.value if hasattr(income_recurring.frequency, 'value') else income_recurring.frequency
             paycheck = schemas.PaycheckAllocation(
                 id=f"{income_recurring.id}-{paycheck_date.isoformat()}",
-                amount=abs(income_recurring.amount),  # Make sure it's positive
+                amount=abs(income_recurring.amount),
                 date=paycheck_date,
                 source=income_recurring.description,
-                frequency=income_recurring.frequency.value,
+                frequency=freq_value,
                 expenses=expenses_in_period,
                 total_allocation_amount=total_allocation,
                 remaining_amount=abs(income_recurring.amount) - total_allocation,
                 next_paycheck_date=next_paycheck_date
             )
             paychecks.append(paycheck)
-            
             print(f"DEBUG: Paycheck on {paycheck_date} covers {len(expenses_in_period)} expenses totaling ${total_allocation}")
     
     print(f"DEBUG: Returning {len(paychecks)} paychecks for {year_month}")
-    return schemas.AllocationResponse(paychecks=paychecks)
+    return schemas.AllocationResponse(
+        paychecks=paychecks,
+        month=year_month,
+        income=0.0,
+        total_expenses=0.0,
+        savings=0.0
+    )
