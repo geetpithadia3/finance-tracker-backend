@@ -87,8 +87,7 @@ def get_budget_alerts(
     budget = db.query(Budget).filter(
         and_(
             Budget.user_id == current_user.id,
-            Budget.year_month == year_month,
-            Budget.is_active == True
+            Budget.year_month == year_month
         )
     ).first()
     
@@ -122,7 +121,6 @@ def get_budget_alerts(
     active_projects = db.query(ProjectBudget).filter(
         and_(
             ProjectBudget.user_id == current_user.id,
-            ProjectBudget.is_active == True,
             ProjectBudget.start_date <= current_date,
             ProjectBudget.end_date >= current_date
         )
@@ -227,8 +225,7 @@ def get_budget_alert_summary(
     budget = db.query(Budget).filter(
         and_(
             Budget.user_id == current_user.id,
-            Budget.year_month == current_year_month,
-            Budget.is_active == True
+            Budget.year_month == current_year_month
         )
     ).first()
     
@@ -251,7 +248,6 @@ def get_budget_alert_summary(
     active_projects = db.query(ProjectBudget).filter(
         and_(
             ProjectBudget.user_id == current_user.id,
-            ProjectBudget.is_active == True,
             ProjectBudget.start_date <= current_date,
             ProjectBudget.end_date >= current_date
         )
