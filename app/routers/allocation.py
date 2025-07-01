@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func, extract
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from typing import List
 
@@ -17,6 +17,10 @@ def calculate_paycheck_dates_for_month(income_recurring: models.RecurringTransac
     paycheck_dates = []
     freq = income_recurring.frequency.value if hasattr(income_recurring.frequency, 'value') else income_recurring.frequency
     start_date = income_recurring.start_date
+    
+    # Ensure start_date is timezone-aware
+    if start_date.tzinfo is None:
+        start_date = start_date.replace(tzinfo=timezone.utc)
     
     # Determine the interval for the frequency
     if freq == "DAILY":
@@ -35,11 +39,11 @@ def calculate_paycheck_dates_for_month(income_recurring: models.RecurringTransac
         delta = None
     
     # Calculate the range for the target month
-    month_start = datetime(year, month, 1)
+    month_start = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
-        month_end = datetime(year + 1, 1, 1) - timedelta(seconds=1)
+        month_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
     else:
-        month_end = datetime(year, month + 1, 1) - timedelta(seconds=1)
+        month_end = datetime(year, month + 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
 
     # For daily/weekly/biweekly/four-weekly, preserve cadence from start_date
     if delta is not None:
@@ -84,12 +88,23 @@ def calculate_expense_dates_between_paychecks(
     """Calculate all expense due dates between two paycheck dates"""
     expense_dates = []
     
+    # Ensure all dates are timezone-aware
+    if paycheck_date.tzinfo is None:
+        paycheck_date = paycheck_date.replace(tzinfo=timezone.utc)
+    
     # If no next paycheck date, look 30 days ahead
     if next_paycheck_date is None:
         next_paycheck_date = paycheck_date + timedelta(days=30)
+    elif next_paycheck_date.tzinfo is None:
+        next_paycheck_date = next_paycheck_date.replace(tzinfo=timezone.utc)
+    
+    # Ensure expense due date is timezone-aware
+    expense_due_date = expense_recurring.next_due_date
+    if expense_due_date.tzinfo is None:
+        expense_due_date = expense_due_date.replace(tzinfo=timezone.utc)
     
     # Start from the current expense's next due date or the paycheck date, whichever is later
-    current_date = max(expense_recurring.next_due_date, paycheck_date)
+    current_date = max(expense_due_date, paycheck_date)
     
     # Generate expense dates until the next paycheck
     while current_date < next_paycheck_date:
@@ -290,6 +305,11 @@ def get_allocation(
             freq = expense_recurring.frequency.value if hasattr(expense_recurring.frequency, 'value') else expense_recurring.frequency
             occurrences = []
             current = expense_recurring.start_date
+            
+            # Ensure current date is timezone-aware
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            
             # Find the first occurrence on or after range_start
             while current < range_start:
                 if freq == "DAILY":

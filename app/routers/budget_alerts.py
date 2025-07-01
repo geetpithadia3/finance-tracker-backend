@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, extract
 from typing import List
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 import calendar
 
 from ..database import get_db
@@ -70,7 +70,7 @@ def get_budget_alerts(
     """
     if not year_month:
         # Default to current month
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         year_month = f"{now.year}-{now.month:02d}"
     
     try:
@@ -117,14 +117,27 @@ def get_budget_alerts(
                 alerts.append(alert)
     
     # Check project budget alerts
-    current_date = datetime.now()
-    active_projects = db.query(ProjectBudget).filter(
-        and_(
-            ProjectBudget.user_id == current_user.id,
-            ProjectBudget.start_date <= current_date,
-            ProjectBudget.end_date >= current_date
-        )
+    current_date = datetime.now(timezone.utc)
+    
+    # For database queries, we need to handle timezone-naive dates from the database
+    # We'll filter in Python after fetching to ensure proper timezone comparison
+    all_projects = db.query(ProjectBudget).filter(
+        ProjectBudget.user_id == current_user.id
     ).all()
+    
+    active_projects = []
+    for project in all_projects:
+        # Ensure project dates are timezone-aware
+        project_start = project.start_date
+        project_end = project.end_date
+        
+        if project_start.tzinfo is None:
+            project_start = project_start.replace(tzinfo=timezone.utc)
+        if project_end.tzinfo is None:
+            project_end = project_end.replace(tzinfo=timezone.utc)
+        
+        if project_start <= current_date <= project_end:
+            active_projects.append(project)
     
     for project in active_projects:
         for allocation in project.category_allocations:
@@ -205,7 +218,7 @@ def get_budget_alert_summary(
     """
     REQ-006: Get monthly summary report of budget performance
     """
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     current_year_month = f"{now.year}-{now.month:02d}"
     
     # Get alerts for current month
@@ -244,14 +257,27 @@ def get_budget_alert_summary(
                 categories_on_track += 1
     
     # Check active project budgets
-    current_date = datetime.now()
-    active_projects = db.query(ProjectBudget).filter(
-        and_(
-            ProjectBudget.user_id == current_user.id,
-            ProjectBudget.start_date <= current_date,
-            ProjectBudget.end_date >= current_date
-        )
+    current_date = datetime.now(timezone.utc)
+    
+    # For database queries, we need to handle timezone-naive dates from the database
+    # We'll filter in Python after fetching to ensure proper timezone comparison
+    all_projects = db.query(ProjectBudget).filter(
+        ProjectBudget.user_id == current_user.id
     ).all()
+    
+    active_projects = []
+    for project in all_projects:
+        # Ensure project dates are timezone-aware
+        project_start = project.start_date
+        project_end = project.end_date
+        
+        if project_start.tzinfo is None:
+            project_start = project_start.replace(tzinfo=timezone.utc)
+        if project_end.tzinfo is None:
+            project_end = project_end.replace(tzinfo=timezone.utc)
+        
+        if project_start <= current_date <= project_end:
+            active_projects.append(project)
     
     project_categories = set()
     for project in active_projects:
@@ -273,7 +299,7 @@ def get_budget_alert_summary(
     
     return {
         'period': current_year_month,
-        'generated_at': datetime.now().isoformat(),
+        'generated_at': datetime.now(timezone.utc).isoformat(),
         'summary': {
             'total_categories_tracked': total_categories_tracked,
             'categories_on_track': categories_on_track,

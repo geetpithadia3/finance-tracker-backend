@@ -66,3 +66,8 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
     )
     
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.get("/verify")
+def verify_auth(current_user: User = Depends(auth.get_current_user)):
+    return {"status": "ok", "user_id": current_user.id}

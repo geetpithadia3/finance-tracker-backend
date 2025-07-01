@@ -1,13 +1,14 @@
 from pydantic_settings import BaseSettings
 from typing import List
 import os
+import secrets
 
 
 class Settings(BaseSettings):
     # App settings
     app_name: str = "Finance Tracker API"
     version: str = "1.0.0"
-    debug: bool = True
+    debug: bool = os.environ.get("DEBUG", "False").lower() == "true"
     
     # Database Profile (sqlite, postgresql)
     database_profile: str = "sqlite"
@@ -17,25 +18,22 @@ class Settings(BaseSettings):
     postgresql_database_url: str = "postgresql://user:password@localhost:5432/finance_tracker"
     
     # Security
-    secret_key: str = "your-secret-key-change-in-production"
+    secret_key: str = os.environ.get("SECRET_KEY") or secrets.token_urlsafe(32)
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     
     # CORS
-    allowed_origins: List[str] = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "https://finance-tracker-frontend-7131.onrender.com"
-    ]
+    allowed_origins: List[str] = os.environ.get(
+        "ALLOWED_ORIGINS", 
+        "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173,https://finance-tracker-frontend-7131.onrender.com"
+    ).split(",")
     
     # PostgreSQL specific settings
-    postgres_host: str = "localhost"
-    postgres_port: int = 5432
-    postgres_user: str = "finance_user"
-    postgres_password: str = "finance_password"
-    postgres_database: str = "finance_tracker"
+    postgres_host: str = os.environ.get("POSTGRES_HOST", "localhost")
+    postgres_port: int = int(os.environ.get("POSTGRES_PORT", "5432"))
+    postgres_user: str = os.environ.get("POSTGRES_USER", "finance_user")
+    postgres_password: str = os.environ.get("POSTGRES_PASSWORD", "finance_password")
+    postgres_database: str = os.environ.get("POSTGRES_DATABASE", "finance_tracker")
     
     class Config:
         env_file = ".env"

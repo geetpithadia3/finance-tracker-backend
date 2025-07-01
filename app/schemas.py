@@ -1,10 +1,26 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, validator, Field
 from typing import List, Optional
 from datetime import datetime
+import re
+import uuid
 
 class CategoryBudgetCreate(BaseModel):
     category_id: str
     budget_amount: float
+    
+    @validator('category_id')
+    def validate_category_id(cls, v):
+        try:
+            uuid.UUID(v)
+        except ValueError:
+            raise ValueError('Invalid category ID format')
+        return v
+    
+    @validator('budget_amount')
+    def validate_budget_amount(cls, v):
+        if v < 0 or v > 1000000:
+            raise ValueError('Budget amount must be between 0 and 1,000,000')
+        return round(v, 2)
     # REQ-004: Rollover Configuration
     rollover_enabled: Optional[bool] = False
 
@@ -172,6 +188,40 @@ class TransactionCreate(BaseModel):
     description: str
     amount: float
     occurred_on: datetime
+    
+    @validator('category_id')
+    def validate_category_id(cls, v):
+        try:
+            uuid.UUID(v)
+        except ValueError:
+            raise ValueError('Invalid category ID format')
+        return v
+    
+    @validator('type')
+    def validate_type(cls, v):
+        allowed_types = ['income', 'expense', 'transfer']
+        if v.lower() not in allowed_types:
+            raise ValueError(f'Type must be one of: {allowed_types}')
+        return v.lower()
+    
+    @validator('description')
+    def validate_description(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Description cannot be empty')
+        if len(v) > 500:
+            raise ValueError('Description too long (max 500 characters)')
+        # Allow alphanumeric, spaces, and common punctuation
+        if not re.match(r'^[a-zA-Z0-9\s\-_.,!?()&@#$%]+$', v):
+            raise ValueError('Description contains invalid characters')
+        return v.strip()
+    
+    @validator('amount')
+    def validate_amount(cls, v):
+        if v == 0:
+            raise ValueError('Amount cannot be zero')
+        if v < -1000000 or v > 1000000:
+            raise ValueError('Amount out of reasonable range (-1M to 1M)')
+        return round(v, 2)
 
 class TransactionUpdate(BaseModel):
     id: str
@@ -252,5 +302,36 @@ class AllocationResponse(BaseModel):
     savings: float = 0.0
     month: str
     details: dict = {}
+
+class GoalCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    target_amount: float
+    deadline: Optional[datetime] = None
+    create_temporary_category: Optional[bool] = False
+    temporary_category_name: Optional[str] = None
+
+class GoalUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    target_amount: Optional[float] = None
+    deadline: Optional[datetime] = None
+    status: Optional[str] = None
+    linked_category_id: Optional[str] = None
+
+class GoalResponse(BaseModel):
+    id: str
+    user_id: str
+    name: str
+    description: Optional[str]
+    target_amount: float
+    current_amount: float
+    deadline: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+    status: str
+    linked_category_id: Optional[str]
+    class Config:
+        from_attributes = True
 
  

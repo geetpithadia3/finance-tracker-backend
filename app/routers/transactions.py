@@ -154,6 +154,14 @@ def create_transactions(
         
         db_transaction = models.Transaction(**transaction.dict(), user_id=current_user.id)
         db.add(db_transaction)
+        db.flush()  # Ensure db_transaction.id is available
+
+        # Update goal progress if this transaction's category is linked to a goal
+        goal = db.query(models.Goal).filter(models.Goal.linked_category_id == db_transaction.category_id).first()
+        if goal:
+            goal.current_amount += db_transaction.amount
+            db.commit()
+
         created_transactions.append(db_transaction)
     
     db.commit()
@@ -264,11 +272,27 @@ def update_transactions(
                 # Remove recurrence (recurrence is explicitly None)
                 handle_recurrence_removal(transaction, db)
         
+        # Before updating, store the old amount and category
+        old_category_id = transaction.category_id
+        old_amount = transaction.amount
+
         # Update regular transaction fields (exclude recurrence from the update)
         update_data = update.dict(exclude_unset=True, exclude={'id', 'recurrence'})
         for field, value in update_data.items():
             setattr(transaction, field, value)
-        
+
+        # If category or amount changed, update the goal progress accordingly
+        if ('category_id' in update_data and update_data['category_id'] != old_category_id) or ('amount' in update_data and update_data['amount'] != old_amount):
+            # Subtract old amount from old goal (if any)
+            old_goal = db.query(models.Goal).filter(models.Goal.linked_category_id == old_category_id).first()
+            if old_goal:
+                old_goal.current_amount -= old_amount
+            # Add new amount to new goal (if any)
+            new_goal = db.query(models.Goal).filter(models.Goal.linked_category_id == transaction.category_id).first()
+            if new_goal:
+                new_goal.current_amount += transaction.amount
+            db.commit()
+
         updated_transactions.append(transaction)
     
     db.commit()

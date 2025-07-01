@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, extract, func
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import calendar
 import logging
 import asyncio
@@ -26,6 +26,12 @@ router = APIRouter(prefix="/budgets", tags=["budgets"])
 def get_spending_for_category(db: Session, user_id: str, category_id: str, 
                             start_date: datetime, end_date: datetime) -> float:
     """Get total spending for a category in the given date range"""
+    # Ensure dates are timezone-aware for comparison
+    if start_date.tzinfo is None:
+        start_date = start_date.replace(tzinfo=timezone.utc)
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=timezone.utc)
+    
     transactions = db.query(Transaction).filter(
         and_(
             Transaction.user_id == user_id,
@@ -42,9 +48,9 @@ def get_spending_for_category(db: Session, user_id: str, category_id: str,
 def calculate_month_dates(year_month: str) -> tuple[datetime, datetime]:
     """Calculate start and end dates for a month"""
     year, month = map(int, year_month.split('-'))
-    start_date = datetime(year, month, 1)
+    start_date = datetime(year, month, 1, tzinfo=timezone.utc)
     last_day = calendar.monthrange(year, month)[1]
-    end_date = datetime(year, month, last_day, 23, 59, 59)
+    end_date = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
     return start_date, end_date
 
 def get_category_names(db: Session, category_ids: List[str]) -> Dict[str, str]:
@@ -370,12 +376,21 @@ def check_budget_conflicts(db: Session, user_id: str, category_id: str,
         ).first()
         
         if allocation:
-            if not (end_date < project.start_date or start_date > project.end_date):
+            # Ensure all dates are timezone-aware for comparison
+            project_start = project.start_date
+            project_end = project.end_date
+            
+            if project_start.tzinfo is None:
+                project_start = project_start.replace(tzinfo=timezone.utc)
+            if project_end.tzinfo is None:
+                project_end = project_end.replace(tzinfo=timezone.utc)
+            
+            if not (end_date < project_start or start_date > project_end):
                 conflicts.append({
                     'type': 'project',
                     'budget_id': project.id,
                     'budget_name': project.name,
-                    'period': f"{project.start_date.strftime('%Y-%m-%d')} to {project.end_date.strftime('%Y-%m-%d')}",
+                    'period': f"{project_start.strftime('%Y-%m-%d')} to {project_end.strftime('%Y-%m-%d')}",
                     'allocated_amount': allocation.allocated_amount
                 })
     
@@ -583,12 +598,21 @@ def create_project_budget(
             )
         
         # Create project budget
+        # Ensure dates are timezone-aware
+        start_date = project_budget.start_date
+        end_date = project_budget.end_date
+        
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+        
         db_project_budget = ProjectBudget(
             user_id=current_user.id,
             name=project_budget.name,
             description=project_budget.description,
-            start_date=project_budget.start_date,
-            end_date=project_budget.end_date,
+            start_date=start_date,
+            end_date=end_date,
             total_amount=project_budget.total_amount
         )
         db.add(db_project_budget)
@@ -664,9 +688,15 @@ def update_project_budget(
         if project_budget_update.description is not None:
             project_budget.description = project_budget_update.description
         if project_budget_update.start_date:
-            project_budget.start_date = project_budget_update.start_date
+            start_date = project_budget_update.start_date
+            if start_date.tzinfo is None:
+                start_date = start_date.replace(tzinfo=timezone.utc)
+            project_budget.start_date = start_date
         if project_budget_update.end_date:
-            project_budget.end_date = project_budget_update.end_date
+            end_date = project_budget_update.end_date
+            if end_date.tzinfo is None:
+                end_date = end_date.replace(tzinfo=timezone.utc)
+            project_budget.end_date = end_date
         if project_budget_update.total_amount:
             project_budget.total_amount = project_budget_update.total_amount
         
@@ -772,8 +802,15 @@ def get_project_budget_progress(
         })
     
     # Calculate days remaining
-    current_date = datetime.now()
-    days_remaining = max(0, (project_budget.end_date - current_date).days)
+    current_date = datetime.now(timezone.utc)
+    
+    # Ensure both dates are timezone-aware for comparison
+    end_date = project_budget.end_date
+    if end_date.tzinfo is None:
+        # If end_date is timezone-naive, assume it's UTC
+        end_date = end_date.replace(tzinfo=timezone.utc)
+    
+    days_remaining = max(0, (end_date - current_date).days)
     
     return {
         'id': project_budget.id,

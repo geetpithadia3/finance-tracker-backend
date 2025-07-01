@@ -22,6 +22,8 @@ class Category(Base):
     user_id = Column(String, ForeignKey("users.id"))
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=func.now())
+    is_temporary = Column(Boolean, default=False)
+    linked_goal_id = Column(String, ForeignKey("goals.id"), nullable=True)
     
     user = relationship("User")
     category_budgets = relationship("CategoryBudget", back_populates="category")
@@ -203,4 +205,20 @@ class DateFlexibility(str, Enum):
 class TransactionPriority(str, Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
-    HIGH = "HIGH" 
+    HIGH = "HIGH"
+
+class Goal(Base):
+    __tablename__ = "goals"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    name = Column(String, nullable=False)
+    description = Column(String)
+    target_amount = Column(Float, nullable=False)
+    current_amount = Column(Float, default=0)
+    deadline = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    status = Column(String, default="active")
+    linked_category_id = Column(String, ForeignKey("categories.id"), nullable=True)
+
+    linked_category = relationship("Category", foreign_keys=[linked_category_id]) 

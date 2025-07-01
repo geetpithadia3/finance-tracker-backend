@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func, extract, and_
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import logging
 
 from app.database import get_db
@@ -281,21 +281,34 @@ def get_dashboard(
                            if t.category and t.category.name == 'Savings')
         
         spending_trends.append({
-            "month": datetime(trend_year, trend_month, 1).strftime("%b"),
+            "month": datetime(trend_year, trend_month, 1, tzinfo=timezone.utc).strftime("%b"),
             "income": float(trend_income),
             "expenses": float(trend_expenses),
             "savings": float(trend_savings)
         })
     
     # Get project budgets
-    current_date = datetime.now()
-    active_projects = db.query(models.ProjectBudget).filter(
-        and_(
-            models.ProjectBudget.user_id == current_user.id,
-            models.ProjectBudget.start_date <= current_date,
-            models.ProjectBudget.end_date >= current_date
-        )
+    current_date = datetime.now(timezone.utc)
+    
+    # For database queries, we need to handle timezone-naive dates from the database
+    # We'll filter in Python after fetching to ensure proper timezone comparison
+    all_projects = db.query(models.ProjectBudget).filter(
+        models.ProjectBudget.user_id == current_user.id
     ).all()
+    
+    active_projects = []
+    for project in all_projects:
+        # Ensure project dates are timezone-aware
+        project_start = project.start_date
+        project_end = project.end_date
+        
+        if project_start.tzinfo is None:
+            project_start = project_start.replace(tzinfo=timezone.utc)
+        if project_end.tzinfo is None:
+            project_end = project_end.replace(tzinfo=timezone.utc)
+        
+        if project_start <= current_date <= project_end:
+            active_projects.append(project)
     
     project_budgets = []
     for project in active_projects:
@@ -331,11 +344,11 @@ def get_dashboard(
     category_count = len(set(t.category.name for t in all_transactions if t.category))
     
     # Calculate average daily spending
-    days_in_month = (datetime(year, month + 1, 1) - datetime(year, month, 1)).days if month < 12 else (datetime(year + 1, 1, 1) - datetime(year, month, 1)).days
+    days_in_month = (datetime(year, month + 1, 1, tzinfo=timezone.utc) - datetime(year, month, 1, tzinfo=timezone.utc)).days if month < 12 else (datetime(year + 1, 1, 1, tzinfo=timezone.utc) - datetime(year, month, 1, tzinfo=timezone.utc)).days
     avg_daily_spending = total_expenses / days_in_month if days_in_month > 0 else 0
     
     # Calculate current day of month
-    current_day = min(datetime.now().day, days_in_month) if datetime.now().year == year and datetime.now().month == month else days_in_month
+    current_day = min(datetime.now(timezone.utc).day, days_in_month) if datetime.now(timezone.utc).year == year and datetime.now(timezone.utc).month == month else days_in_month
     
     # Calculate comprehensive financial status
     financial_status = calculate_financial_status(

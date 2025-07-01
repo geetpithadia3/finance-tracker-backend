@@ -10,7 +10,7 @@ import asyncio
 
 from app.config import settings
 from app.database import create_tables
-from app.routers import auth, categories, transactions, budgets, dashboard, expenses, allocation, health, budget_alerts
+from app.routers import auth, categories, transactions, budgets, dashboard, expenses, allocation, health, budget_alerts, goals
 from app.routers import rollover_config
 from app.routers import recurring_transactions
 from app.websockets import router as websocket_router
@@ -29,13 +29,26 @@ app = FastAPI(
     debug=settings.debug
 )
 
+# Security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    return response
+
 # Request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
     
-    # Log incoming request
-    logger.info(f"🔄 {request.method} {request.url.path} - Query: {dict(request.query_params)}")
+    # Filter sensitive data from logs
+    safe_params = {k: v for k, v in request.query_params.items() 
+                   if k.lower() not in ['password', 'token', 'secret', 'key']}
+    logger.info(f"🔄 {request.method} {request.url.path} - Query: {safe_params}")
     
     # Process request
     response = await call_next(request)
@@ -47,19 +60,14 @@ async def log_requests(request: Request, call_next):
     
     return response
 
+# CORS middleware with secure configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "https://finance-tracker-frontend-7131.onrender.com"
-    ],
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "Origin", "X-Requested-With"],
+    expose_headers=["Content-Type", "Authorization"]
 )
 
 # Create tables on startup
@@ -101,6 +109,7 @@ app.include_router(budget_alerts.router)
 app.include_router(rollover_config.router)
 app.include_router(recurring_transactions.router)
 app.include_router(websocket_router)
+app.include_router(goals.router)
 
 # Log available routes for debugging
 logger.info("Available routes:")
