@@ -64,3 +64,11 @@ htmlcov/
 # Deployment
 .vercel/
 .netlify/
+
+# GitHub workflows and CI/CD
+.github/
+.circleci/
+.travis.yml
+.gitlab-ci.yml
+appveyor.yml
+docker-compose.override.yml
