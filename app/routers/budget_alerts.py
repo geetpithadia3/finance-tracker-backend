@@ -105,7 +105,7 @@ def get_budget_alerts(
                 )
             ).all()
             
-            current_spending = sum(abs(t.amount) for t in spent_transactions)
+            current_spending = sum(abs(t.personal_share or 0) for t in spent_transactions)
             category_alerts = check_category_alert_thresholds(
                 db, current_user.id, category_limit, current_spending
             )
@@ -153,7 +153,7 @@ def get_budget_alerts(
                 )
             ).all()
             
-            current_spending = sum(abs(t.amount) for t in spent_transactions)
+            current_spending = sum(abs(t.personal_share or 0) for t in spent_transactions)
             
             # Check thresholds for project allocation
             percentage_used = (current_spending / allocation.allocated_amount * 100) if allocation.allocated_amount > 0 else 0

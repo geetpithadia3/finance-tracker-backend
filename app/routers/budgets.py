@@ -43,7 +43,7 @@ def get_spending_for_category(db: Session, user_id: str, category_id: str,
         )
     ).all()
     
-    return abs(sum(t.amount for t in transactions))
+    return abs(sum(t.personal_share or 0 for t in transactions))
 
 def calculate_month_dates(year_month: str) -> tuple[datetime, datetime]:
     """Calculate start and end dates for a month"""

@@ -152,7 +152,9 @@ def create_transactions(
         if not category:
             raise HTTPException(status_code=404, detail=f"Category {transaction.category_id} not found")
         
-        db_transaction = models.Transaction(**transaction.dict(), user_id=current_user.id)
+        transaction_data = transaction.dict()
+        transaction_data['personal_share'] = transaction_data['amount']  # Set personal_share to amount by default
+        db_transaction = models.Transaction(**transaction_data, user_id=current_user.id)
         db.add(db_transaction)
         db.flush()  # Ensure db_transaction.id is available
 

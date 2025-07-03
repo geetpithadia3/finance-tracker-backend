@@ -6,6 +6,7 @@ import logging
 
 from app.database import get_db
 from app import models, schemas, auth
+from app.routers.budgets import get_spending_for_category, calculate_month_dates
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -167,13 +168,13 @@ def get_dashboard(
     # Calculate transaction totals
     total_income = sum(abs(t.amount) for t in income)
     total_savings = sum(abs(t.amount) for t in savings)
-    total_expenses = sum(t.amount for t in expenses)
+    total_expenses = sum(t.personal_share or 0 for t in expenses)
     
     # Calculate expenses by category
     expenses_by_category = {}
     for t in expenses:
         category_name = t.category.name if t.category else "Uncategorized"
-        expenses_by_category[category_name] = expenses_by_category.get(category_name, 0) + t.amount
+        expenses_by_category[category_name] = expenses_by_category.get(category_name, 0) + (t.personal_share or 0)
     
     # Get budget data for this period
     budget = db.query(models.Budget).filter(
@@ -188,14 +189,14 @@ def get_dashboard(
     if budget:
         for cat_budget in budget.category_limits:
             # Calculate spent amount for this category in this period
-            spent = db.query(func.sum(models.Transaction.amount)).filter(
-                models.Transaction.user_id == current_user.id,
-                models.Transaction.category_id == cat_budget.category_id,
-                models.Transaction.type == "DEBIT",
-                models.Transaction.is_deleted == False,
-                extract('year', models.Transaction.occurred_on) == year,
-                extract('month', models.Transaction.occurred_on) == month
-            ).scalar() or 0.0
+            start_date, end_date = calculate_month_dates(year_month)
+            spent = get_spending_for_category(
+                db, 
+                current_user.id, 
+                cat_budget.category_id, 
+                start_date,
+                end_date
+            )
             
             # Calculate rollover amount if enabled for this category
             rollover_amount = 0
@@ -215,14 +216,14 @@ def get_dashboard(
                 if prev_budget:
                     prev_cat_budget = next((cl for cl in prev_budget.category_limits if cl.category_id == cat_budget.category_id), None)
                     if prev_cat_budget:
-                        prev_spent = db.query(func.sum(models.Transaction.amount)).filter(
-                            models.Transaction.user_id == current_user.id,
-                            models.Transaction.category_id == cat_budget.category_id,
-                            models.Transaction.type == "DEBIT",
-                            models.Transaction.is_deleted == False,
-                            extract('year', models.Transaction.occurred_on) == prev_year,
-                            extract('month', models.Transaction.occurred_on) == prev_month
-                        ).scalar() or 0.0
+                        prev_start_date, prev_end_date = calculate_month_dates(prev_year_month)
+                        prev_spent = get_spending_for_category(
+                            db, 
+                            current_user.id, 
+                            cat_budget.category_id, 
+                            prev_start_date,
+                            prev_end_date
+                        )
                         rollover_amount = max(0, prev_cat_budget.budget_amount - prev_spent)
             
             effective_budget = cat_budget.budget_amount + rollover_amount
@@ -274,7 +275,7 @@ def get_dashboard(
         trend_income = sum(abs(t.amount) for t in trend_transactions 
                           if (t.type == "CREDIT" and t.amount > 0) or 
                           (t.category and t.category.name in income_category_names))
-        trend_expenses = sum(t.amount for t in trend_transactions 
+        trend_expenses = sum(t.personal_share or 0 for t in trend_transactions 
                            if t.type == "DEBIT" and (not t.category or 
                            (t.category.name != 'Transfer' and t.category.name != 'Savings')))
         trend_savings = sum(abs(t.amount) for t in trend_transactions 
@@ -320,7 +321,7 @@ def get_dashboard(
             models.Transaction.occurred_on <= project.end_date
         ).all()
         
-        total_spent = sum(t.amount for t in project_transactions if t.type == "DEBIT")
+        total_spent = sum(t.personal_share or 0 for t in project_transactions if t.type == "DEBIT")
         progress_percentage = (total_spent / project.total_amount * 100) if project.total_amount > 0 else 0
         
         project_budgets.append({
