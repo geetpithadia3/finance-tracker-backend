@@ -331,7 +331,11 @@ mypy app/
 
 ## Documentation
 
-See the `/docs` directory for detailed documentation:
+### Deployment
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Complete Render.com deployment guide with troubleshooting
+
+### Technical Documentation
+See the `/docs` directory for detailed technical documentation:
 - [Architecture](docs/architecture.md) - System design and patterns
 - [Technical Specification](docs/technical_specification.md) - Database and API design
 - [Transaction API V2](docs/transaction_api_v2.md) - Transaction endpoint details
@@ -340,19 +344,47 @@ See the `/docs` directory for detailed documentation:
 
 ## Deployment
 
+### Render.com (Recommended - One-Click Deploy)
+
+**Easiest way to deploy:**
+
+1. Push to GitHub:
+   ```bash
+   git push origin main
+   ```
+
+2. Deploy to Render:
+   - Go to [Render Dashboard](https://dashboard.render.com/)
+   - Click **New +** → **Blueprint**
+   - Select your repository
+   - Render auto-detects `render.yaml` and deploys!
+
+3. Your API is live at: `https://finance-tracker-v2.onrender.com`
+
+**Features:**
+- ✅ Free tier available
+- ✅ Automatic HTTPS
+- ✅ Auto-deploy on git push
+- ✅ Built-in monitoring
+- ✅ Zero configuration needed
+
+📖 **Detailed Guide:** See [DEPLOYMENT.md](DEPLOYMENT.md) for complete instructions, troubleshooting, and production setup.
+
 ### Docker
+
 ```bash
+# Build and run
 docker build -t finance-tracker-v2 .
 docker run -p 8000:8000 --env-file .env finance-tracker-v2
 ```
 
-### Docker Compose
+### Docker Compose (with PostgreSQL)
+
 ```bash
 docker-compose up -d
 ```
 
-### Render.com
-A `render.yaml` is included for one-click deployment to Render.
+This starts both the API and PostgreSQL database.
 
 ## Tech Stack
 

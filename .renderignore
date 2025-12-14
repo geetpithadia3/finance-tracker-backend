@@ -1,0 +1,54 @@
+# Render Build Optimization - Exclude unnecessary files
+
+# Development files
+*.db
+*.sqlite
+*.sqlite3
+test.db
+finance_tracker.db
+
+# Tests
+tests/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation
+docs/
+*.md
+!DEPLOYMENT.md
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Development configs
+.env.example
+.env.sqlite
+.env.postgresql
+docker-compose.yml
+Dockerfile
+
+# Logs
+*.log
+logs/

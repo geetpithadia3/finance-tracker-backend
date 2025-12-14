@@ -1,10 +1,12 @@
 services:
   - type: web
-    name: finance-tracker-api
+    name: finance-tracker-v2
     env: python
+    region: oregon
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    branch: main
+    buildCommand: bash scripts/render-build.sh
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -12,7 +14,16 @@ services:
         value: sqlite
       - key: SECRET_KEY
         generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 30
       - key: DEBUG
-        value: "false"
+        value: false
+      - key: APP_NAME
+        value: Finance Tracker V2
+      - key: VERSION
+        value: 2.0.0
       - key: ALLOWED_ORIGINS
-        value: "https://your-frontend-domain.com,http://localhost:3000"
+        value: "*"
+    healthCheckPath: /health
