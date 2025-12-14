@@ -1,4 +1,3 @@
-```python
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 import uuid
