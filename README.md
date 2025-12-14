@@ -1,352 +1,286 @@
-# Finance Tracker API (Python)
+# Finance Tracker V2
 
-A comprehensive, modular finance tracking application built with FastAPI, featuring advanced budgeting, recurring transactions, and smart allocation systems.
+**"Financial Clarity, Without the Math Anxiety."**
+
+A personal finance tracker built on double-entry accounting principles. Professional-grade accuracy wrapped in a simple API.
+
+## What Makes This Different
+
+Unlike typical expense trackers that just log transactions, this system:
+- **Maintains accounting integrity** - Every transaction is balanced (debits = credits)
+- **Tracks real money movement** - See exactly where your money comes from and goes to
+- **Handles complex scenarios** - Split transactions, shared expenses, multiple payment methods
+- **Auto-categorizes** - Smart pattern matching to categorize transactions automatically
+- **Imports bulk data** - CSV import for bank statements
 
 ## Quick Start
 
-### SQLite (Default - No setup required)
+### Local Development (SQLite)
 
 ```bash
+# Clone and navigate to the project
 cd finance-tracker-python
 
 # Create virtual environment
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Copy SQLite environment configuration
+# Set up environment
 cp .env.sqlite .env
 
-# Run the application
+# Run migrations
+alembic upgrade head
+
+# Start the application
 uvicorn app.main:app --reload
-# Or: python -m app.main
+```
+
+The API will be available at `http://localhost:8000` with interactive documentation at `/docs`.
+
+### Docker (Recommended for Production)
+
+```bash
+# Start with Docker Compose
+docker-compose up --build
+
+# The API will be available at http://localhost:8000
 ```
 
 ### PostgreSQL (Production)
 
+For production deployments, configure PostgreSQL:
+
 ```bash
-cd finance-tracker-python
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install PostgreSQL dependencies
-pip install -r requirements-postgres.txt
-
-# Set up PostgreSQL database (see Database Configuration section)
-# Then copy PostgreSQL environment configuration
+# Copy PostgreSQL environment template
 cp .env.postgresql .env
-# Edit .env with your database credentials
 
-# Run the application
-uvicorn app.main:app --reload
+# Edit .env with your database credentials
+# DATABASE_PROFILE=postgresql
+# POSTGRES_HOST=localhost
+# POSTGRES_PORT=5432
+# POSTGRES_USER=finance_user
+# POSTGRES_PASSWORD=your_secure_password
+# POSTGRES_DATABASE=finance_tracker
+
+# Run migrations
+alembic upgrade head
+
+# Start the application
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-The API will be available at `http://localhost:8000` with automatic documentation at `/docs`.
+## Core Features
+
+### 1. **Double-Entry Accounting**
+Every transaction creates balanced ledger entries:
+```
+Purchase: Groceries $50
+  Debit:  Groceries (Expense) +$50
+  Credit: Cash (Asset)         -$50
+```
+
+### 2. **Split Transactions**
+Break one purchase across multiple categories:
+```json
+{
+  "description": "Target Run",
+  "amount": 150.00,
+  "splits": [
+    {"category_id": "groceries-uuid", "amount": 100.00},
+    {"category_id": "clothing-uuid", "amount": 50.00}
+  ]
+}
+```
+
+### 3. **Personal Share Tracking**
+Track shared expenses and who owes what:
+```json
+{
+  "description": "Team Dinner",
+  "amount": 200.00,
+  "share": {
+    "method": "FIXED",
+    "value": 80.00
+  }
+}
+```
+Result: $80 expense, $120 reimbursable
+
+### 4. **Multiple Payment Sources**
+Specify which account you used:
+- Credit cards
+- Cash
+- Checking account
+- Savings account
+
+### 5. **CSV Import**
+Drag and drop bank statements for bulk import with intelligent auto-categorization.
+
+### 6. **Auto-Categorization**
+Create rules to automatically categorize transactions:
+```
+"Uber" → Transport
+"Whole Foods" → Groceries
+"Netflix" → Entertainment
+```
 
 ## Architecture
 
-Modular, scalable structure following domain-driven design principles:
-
 ```
 app/
-├── routers/
-│   ├── __init__.py
-│   ├── auth.py                    # Authentication endpoints
-│   ├── categories.py              # Category management
-│   ├── transactions.py            # Transaction CRUD operations
-│   ├── budgets.py                 # Budget management & reporting
-│   ├── dashboard.py               # Dashboard analytics
-│   ├── recurring_transactions.py  # Recurring transaction management
-│   ├── expenses.py                # Expense filtering & analysis
-│   └── allocation.py              # Smart allocation system
-├── services/
-│   ├── __init__.py
-│   ├── date_service.py            # Date calculation utilities
-│   └── budget_service.py          # Budget business logic
-├── main.py                        # FastAPI app setup & router registration
-├── models.py                      # SQLAlchemy database models
-├── schemas.py                     # Pydantic request/response models
-├── auth.py                        # JWT authentication utilities
-├── database.py                    # Database configuration
-└── config.py                      # Application settings
+├── core/                     # Infrastructure (auth, logging, middleware)
+├── routers/                  # API endpoints
+│   ├── auth.py
+│   ├── transactions.py
+│   ├── categories.py
+│   ├── accounts.py
+│   ├── imports.py
+│   ├── mappings.py
+│   └── reports.py
+├── services/                 # Business logic
+│   ├── ledger_service.py     # Core double-entry logic
+│   ├── transaction_service.py
+│   ├── import_service.py
+│   └── mapping_service.py
+├── repositories/             # Data access layer
+├── models.py                 # Database models
+└── schemas.py                # Request/response schemas
 ```
+
+### Design Principles
+- **Layered Architecture**: Presentation → Service → Repository → Database
+- **Domain-Driven Design**: Clear separation of concerns
+- **Double-Entry Ledger**: Every transaction is balanced
+- **Type Safety**: Pydantic validation on all inputs
+- **Database Agnostic**: SQLite (dev) or PostgreSQL (prod)
 
 ## API Endpoints
 
 ### Authentication
-- `POST /auth/register` - Register new user (with optional category seeding)
-- `POST /auth/login` - Login user and get JWT token
+- `POST /api/auth/register` - Create new user account
+- `POST /api/auth/login` - Login and get JWT token
 
-### Categories
-- `POST /categories` - Create category
-- `GET /categories` - List user categories
-- `PUT /categories/{id}` - Update category
-- `POST /categories/seed` - Seed default categories for current user
-- `POST /categories/seed/custom` - Create custom categories from list
-- `GET /categories/defaults` - Get default category templates
+### Categories (Expense Accounts)
+- `GET /api/categories` - List all categories
+- `POST /api/categories` - Create new category
+- `PUT /api/categories/{id}` - Update category
+- `DELETE /api/categories/{id}` - Delete category
+
+### Accounts (Assets & Liabilities)
+- `GET /api/accounts` - List all accounts
+- `POST /api/accounts` - Create new account (Cash, Credit Card, etc.)
 
 ### Transactions
-- `POST /transactions` - Create single or bulk transactions
-- `GET /transactions` - List user transactions
-- `PUT /transactions` - Update single or bulk transactions
-- `PUT /transactions/{id}` - Update specific transaction
-- `POST /transactions/list` - List transactions by month
+- `POST /api/transactions` - Create transaction (supports splits & shares)
+- `GET /api/transactions` - List transactions with filters
+- `PUT /api/transactions/{id}` - Update transaction
+- `DELETE /api/transactions/{id}` - Delete transaction
 
-### Budgets
-- `POST /budgets` - Create budget with category limits
-- `GET /budgets` - Get budget details for period
-- `GET /budgets/comparison/monthly` - Monthly budget comparison
-- `GET /budgets/report` - Download budget report (CSV/JSON)
-- `GET /budgets/categories` - Get categories for budgeting
+### Imports
+- `POST /api/imports/csv` - Bulk import from CSV
 
-### Dashboard
-- `GET /dashboard` - Get financial overview for period
-- `GET /dashboard/expenses-by-category` - Expenses grouped by category
+### Mapping Rules
+- `GET /api/mappings` - List auto-categorization rules
+- `POST /api/mappings` - Create new rule
+- `DELETE /api/mappings/{id}` - Delete rule
 
-### Recurring Transactions
-- `POST /recurring-transactions` - Create recurring transaction
-- `GET /recurring-transactions` - List active recurring transactions
-- `GET /recurring-transactions/{id}` - Get specific recurring transaction
-- `PUT /recurring-transactions/{id}` - Update recurring transaction
-- `PUT /recurring-transactions/{id}/status` - Update status (active/inactive)
-- `DELETE /recurring-transactions/{id}` - Delete recurring transaction
+### Reports
+- `GET /api/reports/spending` - Spending analysis by category
+- `GET /api/reports/balance-sheet` - Account balances
 
-### Expenses
-- `GET /expenses` - List expenses by month
-- `POST /expenses/list` - List expenses by month (POST request)
+## Example Usage
 
-### Smart Allocation
-- `GET /allocation` - Get smart allocation recommendations
-
-### Health & Monitoring
-- `GET /` - API information
-- `GET /health` - Comprehensive health check with database connectivity
-- `GET /health/database` - Detailed database information and status
-- `GET /tutorial` - Tutorial/documentation page
-
-## Features
-
-### Core Features
-- ✅ **Modular Architecture**: Domain-separated routers and services
-- ✅ **JWT Authentication**: Secure user authentication
-- ✅ **Multi-database Support**: SQLite (development) and PostgreSQL (production)
-- ✅ **Configuration Profiles**: Easy database switching via `DATABASE_PROFILE` environment variable
-- ✅ **Database Health Monitoring**: Built-in connectivity checks and status endpoints
-- ✅ **CORS Support**: Cross-origin resource sharing
-- ✅ **Input Validation**: Comprehensive validation with Pydantic
-- ✅ **Auto Documentation**: Interactive API docs at `/docs`
-
-### Advanced Features
-- ✅ **Category-based Budgeting**: Set limits per category with spending tracking
-- ✅ **Auto-seeded Categories**: 19 pre-defined categories for new users (optional)
-- ✅ **Recurring Transactions**: Flexible scheduling with date flexibility options
-- ✅ **Smart Allocation**: AI-powered budget allocation recommendations
-- ✅ **Bulk Operations**: Create/update multiple transactions at once
-- ✅ **Expense Analytics**: Category-based expense analysis
-- ✅ **Report Generation**: CSV export for budget reports
-- ✅ **Dashboard Analytics**: Real-time financial overview
-
-### Business Logic Features
-- ✅ **Budget Status Tracking**: Over budget, near limit, under budget alerts
-- ✅ **Date Flexibility**: Recurring transactions with smart date handling
-- ✅ **Transaction Priorities**: Critical, high, medium, low priority levels
-- ✅ **Variable Amount Support**: Handle transactions with estimated ranges
-
-## Database Configuration
-
-The application supports both SQLite and PostgreSQL databases through configuration profiles, allowing seamless switching between development and production environments.
-
-### 🔧 Configuration Profiles
-
-Switch databases using the `DATABASE_PROFILE` environment variable:
-- `sqlite` - File-based database (default, zero setup)
-- `postgresql` - Production-ready database server
-
-### 📦 SQLite (Default - Development)
-
-**Perfect for:** Development, testing, small deployments, quick prototyping
-
-**Features:**
-- Zero setup required
-- File-based storage
-- Built-in with Python
-- Automatic table creation
-
+### 1. Register and Login
 ```bash
-# Quick start with SQLite
-cp .env.sqlite .env
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+# Register
+curl -X POST "http://localhost:8000/api/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "john", "password": "secret123"}'
 
-# Or manually configure:
-echo "DATABASE_PROFILE=sqlite" > .env
-echo "SQLITE_DATABASE_URL=sqlite:///./finance_tracker.db" >> .env
-echo "SECRET_KEY=your-secret-key-here" >> .env
+# Login
+curl -X POST "http://localhost:8000/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "john", "password": "secret123"}'
 ```
 
-### 🐘 PostgreSQL (Production)
-
-**Perfect for:** Production deployments, high concurrency, data integrity, scalability
-
-**Features:**
-- Production-grade performance
-- ACID compliance
-- Advanced querying capabilities
-- Connection pooling and optimization
-
+### 2. Create a Simple Transaction
 ```bash
-# Setup for PostgreSQL
-pip install -r requirements-postgres.txt
-cp .env.postgresql .env
-
-# Edit .env with your PostgreSQL credentials:
-DATABASE_PROFILE=postgresql
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_USER=finance_user
-POSTGRES_PASSWORD=your_secure_password
-POSTGRES_DATABASE=finance_tracker
-SECRET_KEY=your-secret-key-here
-DEBUG=false
+curl -X POST "http://localhost:8000/api/transactions" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "category_id": "groceries-category-id",
+    "type": "DEBIT",
+    "description": "Whole Foods",
+    "amount": 85.50,
+    "occurred_on": "2024-12-14T12:00:00"
+  }'
 ```
 
-### 🚀 Quick Database Switching
-
-Switch between databases instantly:
-
+### 3. Split Transaction
 ```bash
-# Development with SQLite
-export DATABASE_PROFILE=sqlite
-uvicorn app.main:app --reload
-
-# Production with PostgreSQL  
-export DATABASE_PROFILE=postgresql
-uvicorn app.main:app --reload
-
-# Check current database status
-curl http://localhost:8000/health/database
+curl -X POST "http://localhost:8000/api/transactions" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "category_id": "groceries-category-id",
+    "type": "DEBIT",
+    "description": "Target Run",
+    "amount": 150.00,
+    "occurred_on": "2024-12-14T14:00:00",
+    "splits": [
+      {"category_id": "groceries-id", "amount": 100.00, "description": "Food"},
+      {"category_id": "clothing-id", "amount": 50.00, "description": "Shirt"}
+    ]
+  }'
 ```
 
-### 🛠️ PostgreSQL Server Setup
-
-#### 1. Install PostgreSQL
-
+### 4. Import CSV
 ```bash
-# macOS with Homebrew
-brew install postgresql
-brew services start postgresql
-
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install postgresql postgresql-contrib
-sudo systemctl start postgresql
-sudo systemctl enable postgresql
-
-# Windows
-# Download from https://www.postgresql.org/download/windows/
-
-# Docker (Quick setup)
-docker run --name finance-postgres \
-  -e POSTGRES_USER=finance_user \
-  -e POSTGRES_PASSWORD=finance_password \
-  -e POSTGRES_DB=finance_tracker \
-  -p 5432:5432 \
-  -d postgres:15
+curl -X POST "http://localhost:8000/api/imports/csv" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "file=@statement.csv"
 ```
 
-#### 2. Create Database and User
+## Database Schema
 
-```sql
-# Connect to PostgreSQL
-sudo -u postgres psql
+The application uses a double-entry ledger model:
 
-# Create database and user
-CREATE DATABASE finance_tracker;
-CREATE USER finance_user WITH PASSWORD 'your_secure_password';
-GRANT ALL PRIVILEGES ON DATABASE finance_tracker TO finance_user;
+### Core Tables
+- **parties** - Economic actors (users, households)
+- **accounts** - Asset, Liability, Income, and Expense accounts
+- **ledger_transactions** - Transaction headers (date, description)
+- **entries** - Individual debits and credits
 
-# Grant schema permissions (PostgreSQL 15+)
-\c finance_tracker
-GRANT ALL ON SCHEMA public TO finance_user;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO finance_user;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO finance_user;
+### Supporting Tables
+- **users** - Authentication credentials
+- **mapping_rules** - Auto-categorization rules
+- **budget_rules** - Spending limits (future)
+- **recurring_templates** - Recurring transactions (future)
 
-\q
-```
+## Configuration
 
-#### 3. Test Connection
-
-```bash
-# Test connection
-psql -h localhost -U finance_user -d finance_tracker
-
-# Or test with the app
-curl http://localhost:8000/health/database
-```
-
-### 🔍 Health Monitoring
-
-Monitor your database connection status:
-
-```bash
-# Check overall health
-curl http://localhost:8000/health
-
-# Response:
-{
-  "status": "healthy",
-  "timestamp": "2024-06-11T21:27:39.409Z",
-  "service": "Finance Tracker API",
-  "version": "1.0.0",
-  "database": {
-    "profile": "postgresql",
-    "connection": "connected",
-    "url_masked": "postgresql://finance_user:****@localhost:5432/finance_tracker"
-  }
-}
-
-# Detailed database info
-curl http://localhost:8000/health/database
-
-# Response:
-{
-  "profile": "postgresql",
-  "is_sqlite": false,
-  "is_postgresql": true,
-  "connection_status": "connected",
-  "url_masked": "postgresql://finance_user:****@localhost:5432/finance_tracker"
-}
-```
-
-### ⚙️ Environment Configuration
-
-Complete environment variable reference:
+### Environment Variables
 
 ```env
-# Application Settings
-APP_NAME=Finance Tracker API
-VERSION=1.0.0
+# Application
+APP_NAME=Finance Tracker V2
+VERSION=2.0.0
 DEBUG=true
 
-# Database Configuration
+# Database
 DATABASE_PROFILE=sqlite  # or postgresql
-
-# SQLite Configuration (when DATABASE_PROFILE=sqlite)
 SQLITE_DATABASE_URL=sqlite:///./finance_tracker.db
 
-# PostgreSQL Configuration (when DATABASE_PROFILE=postgresql)
+# PostgreSQL (when DATABASE_PROFILE=postgresql)
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_USER=finance_user
-POSTGRES_PASSWORD=finance_password
+POSTGRES_PASSWORD=your_password
 POSTGRES_DATABASE=finance_tracker
-
-# Alternative: Direct PostgreSQL URL
-# POSTGRESQL_DATABASE_URL=postgresql://finance_user:finance_password@localhost:5432/finance_tracker
 
 # Security
 SECRET_KEY=your-secret-key-change-in-production
@@ -354,124 +288,92 @@ ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 
 # CORS
-ALLOWED_ORIGINS=["*"]
-```
-
-### 📋 Database Comparison
-
-| Feature | SQLite | PostgreSQL |
-|---------|--------|------------|
-| **Setup** | Zero configuration | Requires server setup |
-| **Performance** | Good for < 100k records | Excellent for millions of records |
-| **Concurrency** | Limited concurrent writes | High concurrent read/write |
-| **ACID Compliance** | Yes | Yes |
-| **Backup** | Copy file | pg_dump/pg_restore |
-| **Deployment** | Single file | Database server |
-| **Use Case** | Development, small apps | Production, enterprise |
-| **Memory Usage** | Minimal | Configurable |
-| **Connection Pooling** | File-based | Built-in advanced pooling |
-
-### 🔄 Migration Between Databases
-
-```bash
-# Export data from SQLite
-# (Manual process - export via API or direct SQL)
-
-# Import to PostgreSQL
-# 1. Set up PostgreSQL database
-# 2. Change DATABASE_PROFILE=postgresql
-# 3. Run application (auto-creates tables)
-# 4. Import data via API or SQL scripts
-```
-
-## Extending the Application
-
-The modular architecture makes it easy to extend:
-
-1. **Add new domain**: Create new router in `app/routers/`
-2. **Add business logic**: Create service in `app/services/`
-3. **Add models**: Define in `models.py`
-4. **Add validation**: Define schemas in `schemas.py`
-5. **Register router**: Add to `main.py` router includes
-
-### Example: Adding a new feature
-
-```python
-# 1. Create app/routers/investments.py
-from fastapi import APIRouter
-router = APIRouter(prefix="/investments", tags=["investments"])
-
-@router.get("")
-def list_investments():
-    return {"message": "Investment feature"}
-
-# 2. Add to app/main.py
-from app.routers import investments
-app.include_router(investments.router)
-```
-
-## Example Usage
-
-```bash
-# Register (with default categories)
-curl -X POST "http://localhost:8000/auth/register" \
-  -H "Content-Type: application/json" \
-  -d '{"username": "john", "password": "secret"}'
-
-# Register without default categories
-curl -X POST "http://localhost:8000/auth/register?seed_categories=false" \
-  -H "Content-Type: application/json" \
-  -d '{"username": "jane", "password": "secret"}'
-
-# Login
-curl -X POST "http://localhost:8000/auth/login" \
-  -H "Content-Type: application/json" \
-  -d '{"username": "john", "password": "secret"}'
-
-# Create category (with token)
-curl -X POST "http://localhost:8000/categories" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Food"}'
-
-# Create transaction
-curl -X POST "http://localhost:8000/transactions" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"type": "EXPENSE", "amount": 25.50, "description": "Lunch", "category_id": "CATEGORY_ID", "occurred_on": "2024-06-11T12:00:00"}'
-
-# Create budget
-curl -X POST "http://localhost:8000/budgets" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"year_month": "2024-06", "category_limits": [{"category_id": "CATEGORY_ID", "budget_amount": 500.00}]}'
-
-# Get dashboard
-curl -X GET "http://localhost:8000/dashboard?year_month=2024-06" \
-  -H "Authorization: Bearer YOUR_TOKEN"
-
-# Get default category templates
-curl -X GET "http://localhost:8000/categories/defaults"
-
-# Seed default categories for existing user
-curl -X POST "http://localhost:8000/categories/seed" \
-  -H "Authorization: Bearer YOUR_TOKEN"
-
-# Create custom categories
-curl -X POST "http://localhost:8000/categories/seed/custom" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '["Cryptocurrency", "Pet Expenses", "Home Improvement"]'
+ALLOWED_ORIGINS=["http://localhost:3000"]
 ```
 
 ## Development
 
-### Project Structure Benefits
+### Running Tests
+```bash
+# Run all tests
+pytest
 
-- **Scalability**: Easy to add new features without touching existing code
-- **Maintainability**: Clear separation of concerns
-- **Testing**: Each router/service can be tested independently  
-- **Team Development**: Multiple developers can work on different domains
-- **Code Reuse**: Services can be shared across routers
-- **Database Flexibility**: Switch between SQLite and PostgreSQL without code changes
-- **Environment Parity**: Same codebase runs in development (SQLite) and production (PostgreSQL)
+# Run with coverage
+pytest --cov=app --cov-report=html
+
+# Run specific test file
+pytest tests/test_transfers_splits.py
+```
+
+### Database Migrations
+```bash
+# Create new migration
+alembic revision --autogenerate -m "description"
+
+# Apply migrations
+alembic upgrade head
+
+# Rollback one migration
+alembic downgrade -1
+```
+
+### Code Quality
+```bash
+# Format code
+black app/ tests/
+
+# Lint
+flake8 app/ tests/
+
+# Type checking
+mypy app/
+```
+
+## Documentation
+
+See the `/docs` directory for detailed documentation:
+- [Architecture](docs/architecture.md) - System design and patterns
+- [Technical Specification](docs/technical_specification.md) - Database and API design
+- [Transaction API V2](docs/transaction_api_v2.md) - Transaction endpoint details
+- [Vision](docs/vision.md) - Product philosophy and goals
+- [Roadmap](docs/roadmap.md) - Implementation progress
+
+## Deployment
+
+### Docker
+```bash
+docker build -t finance-tracker-v2 .
+docker run -p 8000:8000 --env-file .env finance-tracker-v2
+```
+
+### Docker Compose
+```bash
+docker-compose up -d
+```
+
+### Render.com
+A `render.yaml` is included for one-click deployment to Render.
+
+## Tech Stack
+
+- **Framework**: FastAPI 0.104+
+- **ORM**: SQLAlchemy 2.0+
+- **Database**: SQLite (dev) / PostgreSQL (prod)
+- **Migrations**: Alembic
+- **Validation**: Pydantic v2
+- **Authentication**: JWT (python-jose)
+- **Testing**: pytest
+- **Python**: 3.11+
+
+## License
+
+MIT
+
+## Support
+
+For issues and questions, please open an issue on GitHub.
+
+---
+
+**Version**: 2.0.0
+**Status**: Production Ready

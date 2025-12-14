@@ -1,129 +1,58 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from typing import List, Dict
+"""
+Refactored categories router using the new layered architecture
+Maintains original API paths for backwards compatibility
+"""
+from fastapi import APIRouter, Depends, status, Query
+from typing import List, Optional
+from app import schemas, auth
+from app.models import User
+from app.services.category_service import CategoryService
+from app.core.dependencies import get_category_service
+import logging
 
-from app.database import get_db
-from app import models, schemas, auth
-from app.services.category_service import CategorySeedingService
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/categories", tags=["categories"])
 
 
-@router.post("", response_model=schemas.Category)
+@router.post("", response_model=schemas.Category, status_code=status.HTTP_201_CREATED)
 def create_category(
-    category: schemas.CategoryCreate,
-    current_user: models.User = Depends(auth.get_current_user),
-    db: Session = Depends(get_db)
+    category_data: schemas.CategoryCreate,
+    current_user: User = Depends(auth.get_current_user),
+    category_service: CategoryService = Depends(get_category_service)
 ):
-    db_category = models.Category(**category.dict(), user_id=current_user.id)
-    db.add(db_category)
-    db.commit()
-    db.refresh(db_category)
-    return db_category
+    """Create a new category"""
+    return category_service.create_category(category_data, current_user)
 
 
 @router.get("", response_model=List[schemas.Category])
-def list_categories(
-    current_user: models.User = Depends(auth.get_current_user),
-    db: Session = Depends(get_db)
+def get_categories(
+    current_user: User = Depends(auth.get_current_user),
+    category_service: CategoryService = Depends(get_category_service),
+    household_id: Optional[str] = Query(None, description="Filter by household"),
+    include_household: bool = Query(True, description="Include household categories"),
+    show_usage_stats: bool = Query(False, description="Include usage statistics")
 ):
-    return db.query(models.Category).filter(models.Category.user_id == current_user.id).all()
+    """Get user categories with optional household categories"""
+    return category_service.get_user_categories(
+        current_user, household_id, include_household, show_usage_stats
+    )
 
 
-@router.put("/{category_id}", response_model=schemas.Category)
-def update_category(
+@router.get("/{category_id}", response_model=schemas.Category)
+def get_category(
     category_id: str,
-    category_update: schemas.CategoryUpdate,
-    current_user: models.User = Depends(auth.get_current_user),
-    db: Session = Depends(get_db)
+    current_user: User = Depends(auth.get_current_user),
+    category_service: CategoryService = Depends(get_category_service)
 ):
-    category = db.query(models.Category).filter(
-        models.Category.id == category_id,
-        models.Category.user_id == current_user.id
-    ).first()
-    
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-    
-    if not category.is_editable:
-        raise HTTPException(status_code=403, detail="This category cannot be edited")
-    
-    update_data = category_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(category, field, value)
-    
-    db.commit()
-    db.refresh(category)
-    return category
+    """Get a specific category"""
+    return category_service.get_category_by_id(category_id, current_user)
 
-
-@router.post("/seed", response_model=List[schemas.Category])
+# Keep seed for potential utility, but simplified
+@router.post("/seed", response_model=List[schemas.Category], status_code=status.HTTP_201_CREATED)
 def seed_default_categories(
-    current_user: models.User = Depends(auth.get_current_user),
-    db: Session = Depends(get_db)
+    current_user: User = Depends(auth.get_current_user),
+    category_service: CategoryService = Depends(get_category_service)
 ):
     """Seed default categories for the current user"""
-    categories = CategorySeedingService.seed_default_categories(db, current_user.id)
-    return categories
-
-
-@router.post("/seed/custom", response_model=List[schemas.Category])
-def seed_custom_categories(
-    category_names: List[str],
-    current_user: models.User = Depends(auth.get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Create custom categories for the current user"""
-    categories = CategorySeedingService.seed_custom_categories(db, current_user.id, category_names)
-    return categories
-
-
-@router.delete("/{category_id}")
-def delete_category(
-    category_id: str,
-    current_user: models.User = Depends(auth.get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a category (only if it's editable)"""
-    category = db.query(models.Category).filter(
-        models.Category.id == category_id,
-        models.Category.user_id == current_user.id
-    ).first()
-    
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-    
-    if not category.is_editable:
-        raise HTTPException(status_code=403, detail="This category cannot be deleted")
-    
-    # Check if category is in use by transactions
-    transaction_count = db.query(models.Transaction).filter(
-        models.Transaction.category_id == category_id
-    ).count()
-    
-    if transaction_count > 0:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Cannot delete category. It is used by {transaction_count} transaction(s)."
-        )
-    
-    # Check if category is in use by recurring transactions
-    recurring_count = db.query(models.RecurringTransaction).filter(
-        models.RecurringTransaction.category_id == category_id
-    ).count()
-    
-    if recurring_count > 0:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Cannot delete category. It is used by {recurring_count} recurring transaction(s)."
-        )
-    
-    db.delete(category)
-    db.commit()
-    return {"message": "Category deleted successfully"}
-
-
-@router.get("/defaults")
-def get_default_categories_info() -> List[Dict[str, str]]:
-    """Get information about available default categories without creating them"""
-    return CategorySeedingService.get_default_categories_info()
+    return category_service.seed_default_categories(current_user)

@@ -1,41 +1,21 @@
-from fastapi import APIRouter
-from datetime import datetime
-
-from app.config import settings
-from app.database import check_database_connection, get_database_info
+from fastapi import APIRouter, Depends
+from app.services.health_service import HealthService
+from app.core.dependencies import get_health_service
 
 router = APIRouter(prefix="/health", tags=["health"])
 
 
 @router.get("")
-def health_check():
+def health_check(
+    health_service: HealthService = Depends(get_health_service)
+):
     """Comprehensive health check including database connectivity"""
-    db_status = check_database_connection()
-    db_info = get_database_info()
-    
-    return {
-        "status": "healthy" if db_status else "unhealthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "service": settings.app_name,
-        "version": settings.version,
-        "database": {
-            "profile": db_info["profile"],
-            "connection": "connected" if db_status else "disconnected",
-            "url_masked": db_info["url"]
-        }
-    }
+    return health_service.health_check()
 
 
 @router.get("/database")
-def database_info():
+def database_info(
+    health_service: HealthService = Depends(get_health_service)
+):
     """Get detailed database information"""
-    db_info = get_database_info()
-    db_status = check_database_connection()
-    
-    return {
-        "profile": db_info["profile"],
-        "is_sqlite": db_info["is_sqlite"],
-        "is_postgresql": db_info["is_postgresql"],
-        "connection_status": "connected" if db_status else "disconnected",
-        "url_masked": db_info["url"]
-    }
+    return health_service.get_database_info()

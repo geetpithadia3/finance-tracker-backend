@@ -1,32 +1,33 @@
-from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+"""
+Finance Tracker API V2 - Main Application Entry Point
+Built on double-entry accounting principles with modern architecture
+"""
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import os
 import logging
 import time
-from typing import Set
-import asyncio
 
 from app.config import settings
 from app.database import create_tables
-from app.routers import auth, categories, transactions, budgets, dashboard, expenses, allocation, health, budget_alerts, goals
-from app.routers import rollover_config
-from app.routers import recurring_transactions
-from app.websockets import router as websocket_router
+from app.core.logging_config import setup_logging
+# Import V2 routers
+from app.routers import (
+    auth, transactions, categories, health, imports, reports, accounts, mappings
+)
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+setup_logging(log_level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("finance_tracker.main")
 
 app = FastAPI(
     title=settings.app_name,
-    version=settings.version,
-    debug=settings.debug
+    version="2.0.0",
+    debug=settings.debug,
+    description="Personal Finance Tracker V2 - Built on double-entry accounting with support for split transactions, auto-categorization, and CSV imports."
 )
 
 # Security headers middleware
@@ -44,20 +45,20 @@ async def add_security_headers(request: Request, call_next):
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
-    
+
     # Filter sensitive data from logs
-    safe_params = {k: v for k, v in request.query_params.items() 
+    safe_params = {k: v for k, v in request.query_params.items()
                    if k.lower() not in ['password', 'token', 'secret', 'key']}
     logger.info(f"🔄 {request.method} {request.url.path} - Query: {safe_params}")
-    
+
     # Process request
     response = await call_next(request)
-    
+
     # Log response
     process_time = time.time() - start_time
     status_icon = "✅" if response.status_code < 400 else "❌"
     logger.info(f"{status_icon} {request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s")
-    
+
     return response
 
 # CORS middleware with secure configuration
@@ -71,9 +72,7 @@ app.add_middleware(
 )
 
 # Create tables on startup
-logger.info("Starting application...")
-create_tables()
-logger.info("Database tables created/verified")
+logger.info("Starting Finance Tracker V2...")
 
 # Mount static files
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
@@ -83,7 +82,11 @@ if os.path.exists(static_dir):
 
 @app.get("/")
 async def root():
-    return {"message": settings.app_name, "version": settings.version}
+    return {
+        "message": settings.app_name,
+        "version": "2.0.0",
+        "description": "Double-entry accounting for personal finance"
+    }
 
 
 @app.get("/health")
@@ -92,38 +95,26 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "service": settings.app_name
+        "service": settings.app_name,
+        "version": "2.0.0"
     }
 
 
-# Include routers
-app.include_router(auth.router)
-app.include_router(categories.router)
-app.include_router(transactions.router)
-app.include_router(budgets.router)
-app.include_router(dashboard.router)
-app.include_router(expenses.router)
-app.include_router(allocation.router)
-app.include_router(health.router)
-app.include_router(budget_alerts.router)
-app.include_router(rollover_config.router)
-app.include_router(recurring_transactions.router)
-app.include_router(websocket_router)
-app.include_router(goals.router)
+# Include V2 routers with /api prefix
+app.include_router(auth.router, prefix="/api")
+app.include_router(categories.router, prefix="/api")
+app.include_router(transactions.router, prefix="/api")
+app.include_router(accounts.router, prefix="/api")
+app.include_router(imports.router, prefix="/api")
+app.include_router(mappings.router, prefix="/api")
+app.include_router(reports.router, prefix="/api")
+app.include_router(health.router, prefix="/api")
 
 # Log available routes for debugging
-logger.info("Available routes:")
-budget_routes = []
+logger.info("Available V2 API routes:")
 for route in app.routes:
     if hasattr(route, 'path') and hasattr(route, 'methods'):
-        route_info = f"  {list(route.methods)} {route.path}"
-        logger.info(route_info)
-        if '/budgets' in route.path:
-            budget_routes.append(route_info)
-
-logger.info("Budget-related routes:")
-for route in budget_routes:
-    logger.info(route)
+        logger.info(f"  {list(route.methods)} {route.path}")
 
 
 # Tutorial/Documentation endpoint
@@ -132,23 +123,25 @@ def show_tutorial():
     """Display the tutorial/how-it-works page"""
     static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
     tutorial_path = os.path.join(static_dir, "tutorial.html")
-    
+
     if os.path.exists(tutorial_path):
         with open(tutorial_path, 'r', encoding='utf-8') as f:
             return HTMLResponse(content=f.read())
     else:
         return HTMLResponse(content="""
         <html>
-        <head><title>Finance Tracker Tutorial</title></head>
+        <head><title>Finance Tracker V2 Tutorial</title></head>
         <body>
-        <h1>Finance Tracker Tutorial</h1>
-        <p>Welcome to Finance Tracker! This comprehensive personal finance management system includes:</p>
+        <h1>Finance Tracker V2 - Double-Entry Accounting Made Simple</h1>
+        <p>Welcome to Finance Tracker V2! This personal finance management system features:</p>
         <ul>
-        <li>Category-based transaction tracking</li>
-        <li>Advanced budget management with category limits</li>
-        <li>Smart allocation system</li>
-        <li>Recurring transactions with flexible scheduling</li>
-        <li>Month-based analytics and reporting</li>
+        <li><strong>Double-Entry Accounting</strong>: Professional-grade accuracy for every transaction</li>
+        <li><strong>Split Transactions</strong>: Break one purchase across multiple categories</li>
+        <li><strong>Personal Share Tracking</strong>: Track shared expenses and reimbursables</li>
+        <li><strong>Multiple Payment Sources</strong>: Credit cards, cash, checking accounts</li>
+        <li><strong>CSV Import</strong>: Bulk import bank statements</li>
+        <li><strong>Auto-Categorization</strong>: Smart pattern-based transaction categorization</li>
+        <li><strong>Financial Reports</strong>: Comprehensive spending analysis</li>
         </ul>
         <p>Visit <a href="/docs">/docs</a> for complete API documentation.</p>
         </body>
@@ -156,34 +149,10 @@ def show_tutorial():
         """)
 
 
-# --- WebSocket for real-time rollover updates ---
-
-connected_rollover_clients: Set[WebSocket] = set()
-
-@app.websocket("/api/rollover-updates")
-async def rollover_updates_ws(websocket: WebSocket):
-    await websocket.accept()
-    connected_rollover_clients.add(websocket)
-    try:
-        while True:
-            # Keep the connection alive (ping/pong or sleep)
-            await asyncio.sleep(30)
-    except WebSocketDisconnect:
-        connected_rollover_clients.remove(websocket)
-
-async def broadcast_rollover_update(message: dict):
-    """Broadcast a rollover update to all connected clients."""
-    disconnected = set()
-    for ws in connected_rollover_clients:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            disconnected.add(ws)
-    for ws in disconnected:
-        connected_rollover_clients.remove(ws)
-
-
 if __name__ == "__main__":
     import uvicorn
+    logger.info("Starting Finance Tracker V2...")
+    create_tables()
+    logger.info("Database tables created/verified")
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port, reload=settings.debug)

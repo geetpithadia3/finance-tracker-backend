@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from typing import List
 import os
 import secrets
+from pydantic import field_validator
 
 
 class Settings(BaseSettings):
@@ -9,6 +10,7 @@ class Settings(BaseSettings):
     app_name: str = "Finance Tracker API"
     version: str = "1.0.0"
     debug: bool = os.environ.get("DEBUG", "False").lower() == "true"
+    testing: bool = os.environ.get("TESTING", "False").lower() == "true"
     
     # Database Profile (sqlite, postgresql)
     database_profile: str = "sqlite"
@@ -23,10 +25,23 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     
     # CORS
-    allowed_origins: List[str] = os.environ.get(
-        "ALLOWED_ORIGINS", 
-        "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173,https://finance-tracker-frontend-7131.onrender.com"
-    ).split(",")
+    allowed_origins: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173", "https://finance-tracker-frontend-7131.onrender.com"]
+    
+    @field_validator('allowed_origins', mode='before')
+    @classmethod
+    def parse_allowed_origins(cls, v):
+        if isinstance(v, str):
+            # Handle wildcard case
+            if v.strip() in ['["*"]', '["*"]', '*']:
+                return ["*"]
+            
+            # Handle comma-separated string
+            if ',' in v:
+                return [origin.strip() for origin in v.split(',') if origin.strip()]
+            
+            # Handle single origin
+            return [v.strip()] if v.strip() else []
+        return v
     
     # PostgreSQL specific settings
     postgres_host: str = os.environ.get("POSTGRES_HOST", "localhost")
@@ -41,6 +56,9 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """Get database URL based on the active profile"""
+        if self.testing:
+            return "sqlite:///./test.db"
+        
         if self.database_profile.lower() == "postgresql":
             # Build PostgreSQL URL from components or use direct URL
             if hasattr(self, 'postgresql_database_url') and self.postgresql_database_url != "postgresql://user:password@localhost:5432/finance_tracker":
