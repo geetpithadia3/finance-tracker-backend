@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from datetime import timedelta
-import logging
+from typing import Optional
 
 from app.models import User
 from app.schemas import UserCreate, UserLogin, Token
@@ -10,6 +10,7 @@ from app.services.category_service import CategoryService
 from app.services.ledger_service import LedgerService
 from app.core.error_handler import raise_http_exception
 
+import logging
 logger = logging.getLogger("finance_tracker.auth")
 
 class AuthService:
