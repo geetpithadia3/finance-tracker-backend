@@ -8,10 +8,27 @@ services:
     buildCommand: bash scripts/render-build.sh
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
+      # Python Runtime
       - key: PYTHON_VERSION
         value: 3.11.0
+
+      # Database Configuration (PostgreSQL)
       - key: DATABASE_PROFILE
-        value: sqlite
+        value: postgresql
+
+      # PostgreSQL Connection (Set these in Render Dashboard)
+      - key: POSTGRES_HOST
+        sync: false  # Set manually in dashboard
+      - key: POSTGRES_PORT
+        value: 5432
+      - key: POSTGRES_USER
+        sync: false  # Set manually in dashboard
+      - key: POSTGRES_PASSWORD
+        sync: false  # Set manually in dashboard
+      - key: POSTGRES_DATABASE
+        sync: false  # Set manually in dashboard
+
+      # Application Settings
       - key: SECRET_KEY
         generateValue: true
       - key: ALGORITHM
@@ -24,6 +41,9 @@ services:
         value: Finance Tracker V2
       - key: VERSION
         value: 2.0.0
+
+      # CORS (Update with your frontend domain)
       - key: ALLOWED_ORIGINS
         value: "*"
+
     healthCheckPath: /health

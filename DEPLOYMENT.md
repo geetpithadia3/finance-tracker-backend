@@ -1,10 +1,44 @@
 # Deployment Guide - Render.com
 
-This guide will help you deploy Finance Tracker V2 to Render.com in just a few clicks.
+This guide will help you deploy Finance Tracker V2 to Render.com with a cloud PostgreSQL database.
 
-## 🚀 Quick Deploy (Recommended)
+## 📋 Prerequisites
 
-### Option 1: Deploy from GitHub (One-Click)
+Before deploying, you need:
+1. A GitHub account with your code pushed
+2. A Render account (free at [render.com](https://render.com))
+3. **A cloud PostgreSQL database** (see options below)
+
+## 🗄️ Database Setup (Do This First!)
+
+Your app needs a PostgreSQL database. Choose one:
+
+### Quick Option: Render PostgreSQL (Recommended)
+- **Free tier**: 1 GB storage, 97 connections
+- **Same platform**: Low latency, easy setup
+- **Setup time**: 2 minutes
+
+### Other Options:
+- AWS RDS PostgreSQL
+- Azure Database for PostgreSQL
+- ElephantSQL
+- Supabase
+- Neon
+
+📖 **See complete setup guide**: [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md)
+
+**Important**: Get your database credentials ready before deploying:
+- Host (e.g., `your-db.postgres.render.com`)
+- Port (usually `5432`)
+- Username
+- Password
+- Database name
+
+---
+
+## 🚀 Deploy to Render
+
+### Option 1: Deploy from GitHub (Recommended)
 
 1. **Push to GitHub**
    ```bash
@@ -17,14 +51,32 @@ This guide will help you deploy Finance Tracker V2 to Render.com in just a few c
    - Connect your GitHub repository
    - Render will automatically detect `render.yaml` and configure everything
 
-3. **Wait for Build**
+3. **Configure Database Credentials**
+
+   After the service is created:
+   - Go to your web service → **Environment** tab
+   - Add these database variables (using your credentials from database setup):
+
+   | Variable | Value |
+   |----------|-------|
+   | `POSTGRES_HOST` | Your database host |
+   | `POSTGRES_PORT` | 5432 |
+   | `POSTGRES_USER` | Your database username |
+   | `POSTGRES_PASSWORD` | Your database password |
+   | `POSTGRES_DATABASE` | Your database name |
+
+   - Click **Save Changes**
+   - Service will automatically redeploy
+
+4. **Wait for Build**
    - Render will automatically:
      - Install dependencies
      - Run database migrations
+     - Connect to your PostgreSQL database
      - Start the application
    - First build takes ~2-3 minutes
 
-4. **Your API is Live!**
+5. **Your API is Live!**
    - URL: `https://finance-tracker-v2.onrender.com`
    - API Docs: `https://finance-tracker-v2.onrender.com/docs`
    - Health Check: `https://finance-tracker-v2.onrender.com/health`
@@ -48,8 +100,15 @@ This guide will help you deploy Finance Tracker V2 to Render.com in just a few c
    ```
 
 3. **Set Environment Variables**
+
+   Add these required variables:
    ```
-   DATABASE_PROFILE=sqlite
+   DATABASE_PROFILE=postgresql
+   POSTGRES_HOST=<your-db-host>
+   POSTGRES_PORT=5432
+   POSTGRES_USER=<your-db-user>
+   POSTGRES_PASSWORD=<your-db-password>
+   POSTGRES_DATABASE=<your-db-name>
    SECRET_KEY=<auto-generate>
    DEBUG=false
    ALLOWED_ORIGINS=*
@@ -57,23 +116,37 @@ This guide will help you deploy Finance Tracker V2 to Render.com in just a few c
 
 4. **Deploy**
    - Click **Create Web Service**
-   - Wait for deployment to complete
+   - Wait for deployment to complete (~2-3 minutes)
 
 ## 🔧 Configuration
 
 ### Environment Variables
 
-The following are automatically configured via `render.yaml`:
+The following are configured via `render.yaml` and Render Dashboard:
+
+#### Auto-Configured (via render.yaml)
 
 | Variable | Value | Description |
 |----------|-------|-------------|
 | `PYTHON_VERSION` | 3.11.0 | Python runtime version |
-| `DATABASE_PROFILE` | sqlite | Database type (SQLite for simplicity) |
+| `DATABASE_PROFILE` | postgresql | Database type |
 | `SECRET_KEY` | auto-generated | JWT secret key |
 | `ALGORITHM` | HS256 | JWT algorithm |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | 30 | Token expiration |
 | `DEBUG` | false | Production mode |
 | `ALLOWED_ORIGINS` | * | CORS origins (update for security) |
+
+#### Manually Set (via Render Dashboard)
+
+**Required - Add these in Render Dashboard → Environment:**
+
+| Variable | Example Value | Description |
+|----------|---------------|-------------|
+| `POSTGRES_HOST` | `db.render.com` | PostgreSQL host |
+| `POSTGRES_PORT` | `5432` | PostgreSQL port |
+| `POSTGRES_USER` | `finance_user` | Database username |
+| `POSTGRES_PASSWORD` | `your-password` | Database password |
+| `POSTGRES_DATABASE` | `finance_tracker` | Database name |
 
 ### Custom Domain (Optional)
 
@@ -82,41 +155,36 @@ The following are automatically configured via `render.yaml`:
 3. Add your domain: `api.yourdomain.com`
 4. Update DNS with provided CNAME
 
-## 📊 Database
+## 📊 Database Configuration
 
-### SQLite (Default - Free Tier)
+This application **requires a PostgreSQL database**. Data persists across deployments and restarts.
 
-- Automatically configured
-- Data persists on Render's disk
-- Perfect for personal use and demos
-- No additional setup needed
+### Recommended: Render PostgreSQL
 
-**Limitations:**
-- Data lost on service restart/redeploy
-- Not suitable for high-traffic production
+**Benefits:**
+- Same infrastructure as web service
+- Free tier: 1 GB storage, 97 connections
+- Automatic backups (paid plans)
+- Low latency
+- Easy setup
 
-### PostgreSQL (Production)
+**Quick Setup:**
+1. Render Dashboard → **New +** → **PostgreSQL**
+2. Choose region: Oregon (same as web service)
+3. Select plan: Free or Starter
+4. Copy connection details
+5. Add to web service environment variables
 
-To upgrade to PostgreSQL:
+### Alternative: External PostgreSQL
 
-1. **Create PostgreSQL Database**
-   - In Render dashboard: **New +** → **PostgreSQL**
-   - Choose region (same as web service)
-   - Plan: Free or paid
+Supported providers:
+- **AWS RDS** - Enterprise-grade, scalable
+- **Azure Database** - Microsoft ecosystem
+- **ElephantSQL** - Simple managed PostgreSQL
+- **Supabase** - Modern features, realtime
+- **Neon** - Serverless, database branching
 
-2. **Update Environment Variables**
-   ```
-   DATABASE_PROFILE=postgresql
-   POSTGRES_HOST=<from Render PostgreSQL>
-   POSTGRES_PORT=5432
-   POSTGRES_USER=<from Render PostgreSQL>
-   POSTGRES_PASSWORD=<from Render PostgreSQL>
-   POSTGRES_DATABASE=<from Render PostgreSQL>
-   ```
-
-3. **Redeploy**
-   - Migrations run automatically
-   - Data persists across deployments
+📖 **Complete setup guide**: [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md)
 
 ## 🔒 Security Hardening
 

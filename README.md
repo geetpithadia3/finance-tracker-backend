@@ -344,31 +344,43 @@ See the `/docs` directory for detailed technical documentation:
 
 ## Deployment
 
-### Render.com (Recommended - One-Click Deploy)
+### Render.com (Recommended - Simple Deploy)
 
-**Easiest way to deploy:**
+**Deploy with cloud PostgreSQL database:**
 
-1. Push to GitHub:
+1. **Setup PostgreSQL Database** (Required first)
+   - Quick option: Render PostgreSQL (free tier available)
+   - Or use: AWS RDS, Azure, ElephantSQL, etc.
+   - 📖 See [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md) for all options
+
+2. **Push to GitHub:**
    ```bash
    git push origin main
    ```
 
-2. Deploy to Render:
+3. **Deploy to Render:**
    - Go to [Render Dashboard](https://dashboard.render.com/)
    - Click **New +** → **Blueprint**
    - Select your repository
-   - Render auto-detects `render.yaml` and deploys!
+   - Render auto-detects `render.yaml`
 
-3. Your API is live at: `https://finance-tracker-v2.onrender.com`
+4. **Add Database Credentials:**
+   - In Render Dashboard → Your service → Environment
+   - Add: `POSTGRES_HOST`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, etc.
+   - Service auto-redeploys
+
+5. **Your API is live!** `https://finance-tracker-v2.onrender.com`
 
 **Features:**
-- ✅ Free tier available
+- ✅ PostgreSQL cloud database (data persists)
 - ✅ Automatic HTTPS
 - ✅ Auto-deploy on git push
 - ✅ Built-in monitoring
-- ✅ Zero configuration needed
+- ✅ Free tier available
 
-📖 **Detailed Guide:** See [DEPLOYMENT.md](DEPLOYMENT.md) for complete instructions, troubleshooting, and production setup.
+📖 **Complete Guide:**
+- [DEPLOYMENT.md](DEPLOYMENT.md) - Render deployment steps
+- [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md) - Database setup (all providers)
 
 ### Docker
 
