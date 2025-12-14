@@ -10,7 +10,7 @@ services:
     envVars:
       # Python Runtime
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.13.0
 
       # Database Configuration (PostgreSQL)
       - key: DATABASE_PROFILE

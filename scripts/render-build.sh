@@ -8,6 +8,7 @@ echo "🚀 Starting Render build process..."
 # Install dependencies
 echo "📦 Installing Python dependencies..."
 pip install --upgrade pip
+pip uninstall -y psycopg2 psycopg2-binary || true
 pip install -r requirements.txt
 
 # Run database migrations
